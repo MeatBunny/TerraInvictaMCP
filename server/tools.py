@@ -22,7 +22,7 @@ except ImportError:
     modcheck = None
 
 PRETTY_LIMIT = 4096     # responses above this stay compact to save tokens
-TEXT_LIMIT = 160000     # hard cap; mark truncation instead of silent clipping
+TEXT_LIMIT = 160000     # JSON above this is replaced by an explicit tool error
 
 GAME_DOWN = ("game is not running or the bridge is down (%s) -- call "
              "game_start, then observe. A freshly launched game takes 20-60s "
@@ -99,9 +99,19 @@ def json_result(data):
     if len(text) <= PRETTY_LIMIT:
         text = json.dumps(data, indent=2, default=str)
     if len(text) > TEXT_LIMIT:
-        text = (text[:TEXT_LIMIT]
-                + "\n...[truncated at %d chars -- narrow with "
-                  "limit/fields/contains]" % TEXT_LIMIT)
+        # The handler has already run. A clipped JSON document is neither a
+        # usable result nor evidence that a state-changing command failed.
+        return tool_result(json.dumps({
+            "error": "response_too_large",
+            "message": (
+                "Serialized tool response exceeds the text limit; the payload "
+                "was omitted. The operation may already have completed. Do not "
+                "retry a state-changing command blindly; inspect current state "
+                "first. Request less output using limit/fields/contains where "
+                "supported, or make the producer return a smaller result."),
+            "textLength": len(text),
+            "textLimit": TEXT_LIMIT,
+        }, indent=2), True)
     return tool_result(text)
 
 
@@ -1316,5 +1326,5 @@ def handle_call(name, arguments, progress=None):
                            banner)
     failed = isinstance(data, dict) and data.pop("_failed", False)
     result = json_result(data)
-    result["isError"] = bool(failed)
+    result["isError"] = result["isError"] or bool(failed)
     return with_banner(result, banner)

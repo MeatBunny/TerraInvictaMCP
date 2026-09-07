@@ -167,6 +167,24 @@ class MalformedEnvelopeTest(StdioTestCase):
         self.assertIn("RuntimeError", first["error"]["message"])
 
 
+class OversizedResultTest(StdioTestCase):
+    def test_oversized_result_answers_once_and_the_next_request_survives(self):
+        handler = mock.Mock(return_value={"text": "x" * tools.TEXT_LIMIT})
+        with mock.patch.dict(tools.BY_NAME, {"fake_tool": handler}), \
+                mock.patch.object(compose, "bridge", OfflineBridge()):
+            self.feed({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                       "params": {"name": "fake_tool", "arguments": {}}},
+                      {"jsonrpc": "2.0", "id": 2, "method": "ping"})
+        handler.assert_called_once()
+        messages = self.messages()
+        self.assertEqual([message["id"] for message in messages], [1, 2])
+        result = messages[0]["result"]
+        self.assertTrue(result["isError"])
+        report = json.loads(result["content"][0]["text"])
+        self.assertEqual(report["error"], "response_too_large")
+        self.assertIn("result", messages[1])
+
+
 class NotificationTest(StdioTestCase):
     """A message with no id is a notification and is never answered."""
 
