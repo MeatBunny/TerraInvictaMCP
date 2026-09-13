@@ -27,7 +27,7 @@ import tools        # noqa: E402
 # see and report, instead of an invisible one that only a reconnect applies.
 codestate.note()
 
-SERVER_INFO = {"name": "terra-invicta", "version": "0.1.1"}
+SERVER_INFO = {"name": "terra-invicta", "version": "0.1.2"}
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 
 INSTRUCTIONS = """\

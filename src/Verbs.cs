@@ -29,7 +29,7 @@ namespace TerraInvictaMCP
 
     public static partial class Verbs
     {
-        public const string ModVersion = "0.1.1";
+        public const string ModVersion = "0.1.2";
 
         // query.state fans out over one object's members; a ref list longer than this
         // is a graph the client should walk with more queries instead.

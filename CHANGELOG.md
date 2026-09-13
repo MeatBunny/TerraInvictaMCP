@@ -3,6 +3,32 @@
 All notable changes to TerraInvictaMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.1.2] - 2026-09-13
+
+### Fixed
+
+- A JSON tool result over the 160,000-character limit was sliced mid-document
+  with a plain-text note appended, so the client received invalid JSON marked
+  `isError: false` (#12). `json_result` now replaces an oversized result with a
+  small valid `response_too_large` diagnostic carrying `textLength` and
+  `textLimit`, marked `isError: true`, and `handle_call` keeps that flag
+  instead of overwriting it with the handler's own `_failed` state. The handler
+  has already run when the limit trips, so the message says a state-changing
+  command may have completed and must not be retried blindly. Contributed by
+  Laurentiu-Andronache (#13).
+
+### Documentation
+
+- `docs/playbook.md`: an "Oversized tool responses" section on what the
+  diagnostic means and how to narrow a request (#13).
+
+### Tests and CI
+
+- `server/tests/test_results.py`: the size boundary, escaped characters
+  counting toward the limit, dispatch, both `_failed` values, and the pause
+  banner staying a separate content block. `test_jsonrpc.py`: the request
+  after an oversized result is still answered. 560 offline tests.
+
 ## [0.1.1] - 2026-09-06
 
 ### Added
