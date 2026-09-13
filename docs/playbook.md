@@ -22,6 +22,22 @@ Player.log live (the user profile on Windows, the Proton prefix on Linux).
 5. Run `game_stop` when done. Never leave the game running idle. Unsaved
    progress dies with the process.
 
+## Oversized tool responses
+
+The Python server limits a serialized JSON tool payload to 160,000 characters.
+A response that exceeds this limit returns `isError: true` and a complete JSON
+diagnostic with `error: "response_too_large"`, `message`, `textLength` and
+`textLimit`. The original payload is omitted. The size counts serialized text,
+including JSON escapes, before the surrounding MCP envelope; pause-limit
+banners remain separate content blocks.
+
+This is a response delivery failure after the handler ran. The operation may
+already have completed. Inspect current state before retrying a command that
+changes it. For reads, narrow the request with `limit`, `fields` or `contains`
+where the tool supports them. For custom console commands, make the producer
+return a smaller result. Do not interpret missing output as a missing command
+or a failed mutation.
+
 ## The blocked clock
 
 Pending prompts, open alert boxes, modal screens, and unresolved combat
