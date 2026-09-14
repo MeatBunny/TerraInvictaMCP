@@ -9,13 +9,6 @@
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Register claude
 #   powershell -ExecutionPolicy Bypass -File install.ps1 -Help
 #
-# Claude Code is registered for this game folder alone, so when it is the only
-# supported client on PATH there is nothing to consent to and it is registered
-# without asking. A global registration (OpenCode, Antigravity), and any
-# repoint of an existing registration, is always asked for, default No. Without
-# a console to prompt at (piped, scheduled task, CI) those are left alone;
-# re-run with -Register <client> (or -Yes) to make them.
-#
 # TI_ROOT overrides the game root (three levels up) for out-of-tree checkouts.
 param(
     [switch]$Yes,
@@ -209,12 +202,6 @@ if (Test-Path $Orig) {
 }
 
 # --- 3. Client registration -------------------------------------------------
-# Ask only where there is something to consent to. A client already registered
-# at this path is silent; a client that is not installed gets one line; a
-# global registration (OpenCode, Antigravity) and any repoint of an existing
-# registration is asked for, default No. Claude Code registering for the first
-# time is the one case with nothing to consent to when it is alone on PATH:
-# the registration covers this game folder only, so it is made without asking.
 $LoneClaude = [bool]((Get-Command claude -ErrorAction SilentlyContinue) -and
                      -not (Get-Command opencode -ErrorAction SilentlyContinue) -and
                      -not (Get-Command agy -ErrorAction SilentlyContinue))
@@ -497,43 +484,23 @@ if (-not $PyExe) {
     }
 }
 
-# --- 4. Offline self-test: handshake and tool table, no game required. -------
+# --- 4. Offline self-test: server\stdio_selfcheck.py drives a real server
+# through initialize, tools/list, a resource read and several tool calls, no
+# game required, and fails on any stdout line that is not JSON-RPC: the MCP
+# transport is newline-delimited JSON on stdout, so one stray print anywhere in
+# the server (modcheck.py is imported by tools.py) silently kills every
+# client's connection.
+$Hygiene = Join-Path $Server "stdio_selfcheck.py"
 if (-not $PyExe) {
     Warn "skipped server self-test (needs Python)"
-} elseif (-not (Test-Path $Server)) {
-    Warn "server\ not present yet; skipped self-test"
+} elseif (-not (Test-Path $Hygiene)) {
+    Warn "server\stdio_selfcheck.py not present; skipped self-test"
 } else {
-    $Requests = @(
-        '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}'
-        '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-    )
-    $Out = @($Requests | & $PyExe @PyArgs $Server | Where-Object { $_.Trim() })
-    $Passed = $false
-    if ($Out.Count -ge 2) {
-        try {
-            $Init  = $Out[0] | ConvertFrom-Json
-            $Tools = $Out[1] | ConvertFrom-Json
-            if ($Init.result.serverInfo.name -eq "terra-invicta" -and
-                $Tools.result.tools.Count -ge 15) {
-                Ok ("self-test: {0} tools" -f $Tools.result.tools.Count)
-                $Passed = $true
-            }
-        } catch { }
-    }
-    if (-not $Passed) { Warn "server self-test FAILED"; exit 1 }
-}
-
-# --- 5. stdout hygiene: the MCP transport is newline-delimited JSON on stdout,
-# so one stray print anywhere in the server (modcheck.py is imported by
-# tools.py) silently kills every client's connection. Cheap to check, and a
-# failure mode seen in the wild with other MCP servers.
-$Hygiene = Join-Path $Server "stdio_selfcheck.py"
-if ($PyExe -and (Test-Path $Hygiene)) {
     $HygieneOut = & $PyExe @PyArgs $Hygiene 2>&1
     if ($LASTEXITCODE -eq 0) {
-        Ok "stdout hygiene: clean JSON-RPC"
+        Ok "self-test: clean JSON-RPC"
     } else {
-        Warn "stdout hygiene FAILED -- the server printed non-JSON to stdout:"
+        Warn "server self-test FAILED:"
         $HygieneOut | ForEach-Object { Write-Host "        $_" }
         exit 1
     }
@@ -548,15 +515,4 @@ if ($script:UnregIds.Count) {
 Write-Host "done"
 Write-Host ""
 Write-Host "Any other MCP client (Cursor, Cline, Windsurf, ...): add to its MCP config:"
-if ($PyExe) {
-    Write-Host "  $(Get-SnippetJson)"
-} else {
-    $Snippet = [pscustomobject]@{
-        mcpServers = [pscustomobject]@{
-            "terra-invicta" = [pscustomobject]@{
-                command = $RunExe; args = [string[]]$PyCmdArgs
-            }
-        }
-    } | ConvertTo-Json -Depth 20 -Compress
-    Write-Host "  $Snippet"
-}
+Write-Host "  $(Get-SnippetJson)"

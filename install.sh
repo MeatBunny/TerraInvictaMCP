@@ -8,13 +8,6 @@
 #   ./install.sh --yes                register with every client found
 #   ./install.sh --register=claude    register with exactly these, no prompts
 #
-# Claude Code is registered for this game folder alone, so when it is the only
-# supported client on PATH there is nothing to consent to and it is registered
-# without asking. A global registration (OpenCode, Antigravity), and any
-# repoint of an existing registration, is always asked for, default No. Without
-# a TTY (piped, cron, CI) those are left alone; re-run with --register=<client>
-# (or --yes) to make them.
-#
 # TI_ROOT overrides the game root (three levels up) for out-of-tree checkouts.
 set -eu
 
@@ -194,12 +187,6 @@ else
 fi
 
 # --- 3. Client registration -------------------------------------------------
-# Ask only where there is something to consent to. A client already registered
-# at this path is silent; a client that is not installed gets one line; a
-# global registration (OpenCode, Antigravity) and any repoint of an existing
-# registration is asked for, default No. Claude Code registering for the first
-# time is the one case with nothing to consent to when it is alone on PATH:
-# the registration covers this game folder only, so it is made without asking.
 LONE_CLAUDE=0
 if command -v claude >/dev/null 2>&1 &&
    ! command -v opencode >/dev/null 2>&1 &&
@@ -295,9 +282,9 @@ with open(tmp, "w", encoding="utf-8") as fh:
 os.replace(tmp, path)
 EOF
 }
-agy_snippet() {
-    printf '        {"mcpServers": {"terra-invicta": {"command": "%s", "args": ["%s"]}}}\n' \
-        "$PY" "$SERVER"
+agy_snippet() {   # [indent], default 8 spaces
+    printf '%s{"mcpServers": {"terra-invicta": {"command": "%s", "args": ["%s"]}}}\n' \
+        "${1:-        }" "${PY:-python3}" "$SERVER"
 }
 agy_register() {
     if agy_json write "$AGY_TARGET"; then
@@ -413,39 +400,22 @@ else
     fi
 fi
 
-# --- 4. Offline self-test: handshake and tool table, no game required. -------
+# --- 4. Offline self-test: server/stdio_selfcheck.py drives a real server
+# through initialize, tools/list, a resource read and several tool calls, no
+# game required, and fails on any stdout line that is not JSON-RPC: the MCP
+# transport is newline-delimited JSON on stdout, so one stray print anywhere in
+# the server (modcheck.py is imported by tools.py) silently kills every
+# client's connection.
 if [ -z "$PY" ]; then
     warn "skipped server self-test (needs Python)"
-elif [ ! -d "$SERVER" ]; then
-    warn "server/ not present yet; skipped self-test"
-elif printf '%s\n%s\n' \
-    '{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
-    '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
-    | "$PY" "$SERVER" | "$PY" -c '
-import json,sys
-lines=[json.loads(l) for l in sys.stdin if l.strip()]
-assert lines[0]["result"]["serverInfo"]["name"]=="terra-invicta", "bad serverInfo"
-tools=lines[1]["result"]["tools"]
-assert len(tools)>=15, "tool table too small: %d" % len(tools)
-print("  ok    self-test: %d tools" % len(tools))'
-then :
+elif [ ! -f "$SERVER/stdio_selfcheck.py" ]; then
+    warn "server/stdio_selfcheck.py not present; skipped self-test"
+elif out="$("$PY" "$SERVER/stdio_selfcheck.py" 2>&1)"; then
+    ok "self-test: clean JSON-RPC"
 else
-    warn "server self-test FAILED"
+    warn "server self-test FAILED:"
+    printf '%s\n' "$out" | sed 's/^/        /'
     exit 1
-fi
-
-# --- 5. stdout hygiene: the MCP transport is newline-delimited JSON on stdout,
-# so one stray print anywhere in the server (modcheck.py is imported by
-# tools.py) silently kills every client's connection. Cheap to check, and a
-# failure mode seen in the wild with other MCP servers.
-if [ -n "$PY" ] && [ -f "$SERVER/stdio_selfcheck.py" ]; then
-    if out="$("$PY" "$SERVER/stdio_selfcheck.py" 2>&1)"; then
-        ok "stdout hygiene: clean JSON-RPC"
-    else
-        warn "stdout hygiene FAILED -- the server printed non-JSON to stdout:"
-        printf '%s\n' "$out" | sed 's/^/        /'
-        exit 1
-    fi
 fi
 
 if [ -n "$UNREG_IDS" ]; then
@@ -457,5 +427,4 @@ fi
 echo "done"
 echo ""
 echo "Any other MCP client (Cursor, Cline, Windsurf, ...): add to its MCP config:"
-printf '  {"mcpServers": {"terra-invicta": {"command": "%s", "args": ["%s"]}}}\n' \
-    "${PY:-python3}" "$SERVER"
+agy_snippet '  '

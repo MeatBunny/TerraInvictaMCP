@@ -88,7 +88,6 @@ if [ "${#MISSING[@]}" -gt 0 ]; then
     exit 2
 fi
 
-# Recursive so sources may be grouped into subfolders later.
 mapfile -t SRC < <(find "$MOD/src" -name '*.cs' | sort)
 [ "${#SRC[@]}" -gt 0 ] || { echo "no .cs under $MOD/src" >&2; exit 2; }
 

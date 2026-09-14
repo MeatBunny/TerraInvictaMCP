@@ -6,7 +6,7 @@
 #   ./release.sh              build, then package
 #   ./release.sh --no-build   package the DLL already in the folder
 #
-# The version comes from ModInfo.json, so there is one place to bump it.
+# The version comes from ModInfo.json.
 set -euo pipefail
 
 MOD="$(cd "$(dirname "$0")" && pwd)"
@@ -56,17 +56,10 @@ ZIP="$OUT_DIR/$NAME-$VERSION.zip"
 rm -rf "$STAGE" "$ZIP"
 mkdir -p "$STAGE/$NAME"
 
-# Copied by name, so nothing new lands in a release by accident: release.sh
-# itself, .git, .gitignore, .gitattributes, .github/, AGENTS.md, SECURITY.md, __pycache__,
-# *.cache and the generated modcheck_*.dat caches all stay out because they
-# are not listed. src/ and the build scripts DO ship, so a release can be
-# rebuilt against the user's own game assemblies without cloning the repo.
 echo "== staging"
 cp "$MOD/ModInfo.json" "$MOD/$DLL" "$MOD/README.md" "$MOD/LICENSE" \
    "$MOD/install.sh" "$MOD/install.ps1" "$MOD/build.sh" "$MOD/build.ps1" \
    "$STAGE/$NAME/"
-# src/ whole, then everything that is not a .cs removed: build.sh compiles
-# src/ recursively, so a copy by glob would silently miss a subfolder.
 mkdir -p "$STAGE/$NAME/src"
 cp -r "$MOD/src/." "$STAGE/$NAME/src/"
 find "$STAGE/$NAME/src" -type f ! -name '*.cs' -delete
@@ -80,8 +73,6 @@ cp "$MOD"/server/tests/*.py "$STAGE/$NAME/server/tests/"
 # editor's swap file or a stray dotfile in docs/ does not.
 mkdir -p "$STAGE/$NAME/docs"
 cp "$MOD"/docs/*.md "$STAGE/$NAME/docs/"
-find "$STAGE" -name '__pycache__' -type d -prune -exec rm -rf {} +
-find "$STAGE" -name '*.cache' -delete
 chmod +x "$STAGE/$NAME/install.sh" "$STAGE/$NAME/build.sh"
 
 # The game's Mod Manager parses EVERY .json under a mod folder, recursively, as
@@ -98,11 +89,9 @@ STRAY="$(find "$STAGE" -iname '*.json' -not -path "$STAGE/$NAME/ModInfo.json")"
     echo "$STRAY" >&2
     exit 1; }
 
-# Cheap shape checks on what a user unzips.
-for required in "$NAME/$DLL" "$NAME/ModInfo.json" "$NAME/server/__main__.py" \
-                "$NAME/docs/PROTOCOL.md" "$NAME/build.sh" "$NAME/src/Verbs.cs"; do
-    [ -e "$STAGE/$required" ] || {
-        echo "staged tree is missing $required" >&2; exit 1; }
+# Globbed in above, so a missing one is not a cp failure: check by name.
+for f in server/__main__.py docs/PROTOCOL.md src/Verbs.cs; do
+    [ -e "$STAGE/$NAME/$f" ] || { echo "staged tree is missing $f" >&2; exit 1; }
 done
 
 # Last thing staged, so it is newer than every other staged file:
@@ -114,18 +103,10 @@ done
 touch -d '+2 seconds' "$STAGE/$NAME/$DLL"
 
 echo "== packaging $ZIP"
-if command -v zip >/dev/null 2>&1; then
-    (cd "$STAGE" && zip -qr "$ZIP" "$NAME")
-else
-    (cd "$STAGE" && python3 -m zipfile -c "$ZIP" "$NAME")
-fi
+(cd "$STAGE" && zip -qr "$ZIP" "$NAME")
 rm -rf "$STAGE"
 
 echo "== contents"
-if command -v unzip >/dev/null 2>&1; then
-    unzip -l "$ZIP"
-else
-    python3 -m zipfile -l "$ZIP"
-fi
+unzip -l "$ZIP"
 echo
 echo "Release: $ZIP"

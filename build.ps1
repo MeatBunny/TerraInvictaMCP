@@ -2,19 +2,8 @@
 # an installed Unity Mod Manager (its UnityModManager/0Harmony live under the
 # game's Managed folder).
 #
-# Compiler probe order: Mono's mcs on PATH, then a Roslyn csc on PATH.
-#
-# The .NET Framework compiler every Windows install carries at
-# C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe is DETECTED AND
-# REFUSED, deliberately. It is the pre-Roslyn compiler and accepts C# 5 at most,
-# while src\AiControl.cs uses nameof (C# 6), so invoking it can only produce a
-# page of syntax errors that name a language feature and not the real problem.
-# Refusing it up front turns that into one line naming the remedy. Do not "fix"
-# this by deleting the guard: put a Roslyn csc or mcs on PATH instead.
-#
-# csc on PATH is checked the same way, because that well-known folder is
-# sometimes on PATH. "csc -version" is the discriminator: Roslyn prints a
-# version and exits 0, the in-box compiler rejects the switch and exits nonzero.
+# Compiler probe order: Mono's mcs on PATH, then a Roslyn csc on PATH. The
+# pre-Roslyn .NET Framework csc (C# 5 at most) is refused; see -Help.
 #
 # -nostdlib against the game's own assemblies is deliberate: a system C#
 # profile places some BCL types in different assemblies than Unity's Mono, and a
@@ -37,10 +26,10 @@ Restart the game to pick up a new build.
   -Help        this message
 Requirements:
   a C# compiler on PATH: Mono's mcs, or a Roslyn csc (the one shipped with
-  Visual Studio, the Build Tools, or the .NET SDK). The in-box
-  C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe is detected and
-  REFUSED: it is pre-Roslyn, accepts C# 5 at most, and the sources use C# 6,
-  so it can only produce syntax errors that name the wrong problem.
+  Visual Studio, the Build Tools, or the .NET SDK). A pre-Roslyn csc found on
+  PATH (the in-box .NET Framework compiler) is detected and REFUSED: it
+  accepts C# 5 at most and the sources use C# 6, so it can only produce
+  syntax errors that name the wrong problem.
   a Terra Invicta install with Unity Mod Manager already installed: the build
   references the game's own assemblies under TerraInvicta_Data\Managed,
   including UnityModManager\UnityModManager.dll and 0Harmony.dll.
@@ -103,7 +92,6 @@ if ($Missing) {
 
 $SrcDir = Join-Path $Mod "src"
 if (-not (Test-Path $SrcDir)) { Write-Host "no src\ under $Mod"; exit 2 }
-# Recursive so sources may be grouped into subfolders later.
 $Src = @(Get-ChildItem $SrcDir -Filter *.cs -Recurse | Sort-Object FullName)
 if ($Src.Count -eq 0) { Write-Host "no .cs under $SrcDir"; exit 2 }
 
@@ -117,7 +105,6 @@ function Test-RoslynCsc($Path) {
 
 # Compiler probe. Get-Command honours PATHEXT, so a .cmd/.bat shim resolves the
 # same as a native .exe.
-$InBoxCsc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
 $Compiler = $null
 $Kind     = $null
 $Refused  = $null      # a pre-Roslyn csc that was found and will not be used
@@ -129,9 +116,6 @@ if (-not $Compiler) {
         if (Test-RoslynCsc $Found.Source) { $Compiler = $Found.Source; $Kind = "csc" }
         else { $Refused = $Found.Source }
     }
-}
-if (-not $Compiler -and -not $Refused -and (Test-Path $InBoxCsc)) {
-    $Refused = $InBoxCsc
 }
 if (-not $Compiler) {
     Write-Host "no usable C# compiler found."

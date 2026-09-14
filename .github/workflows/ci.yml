@@ -55,8 +55,7 @@ jobs:
         shell: python
         run: |
           # House style is ASCII - and -- everywhere, including code comments
-          # and doc text. The rule lived only as prose, and prose does not fail
-          # a build. Em dash, en dash, horizontal bar, minus sign, the two
+          # and doc text. Em dash, en dash, horizontal bar, minus sign, the two
           # quotation dashes.
           import os, sys
           BAD = "\u2012\u2013\u2014\u2015\u2212\u2010\u2011"
