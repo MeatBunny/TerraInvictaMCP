@@ -594,11 +594,7 @@ namespace TerraInvictaMCP
                 TIFactionState owner = FactionOf(state);
                 if (owner != null) return owner;
             }
-            return Safe<TIFactionState>(delegate
-            {
-                GameControl control = GameControl.control;
-                return control != null ? control.activePlayer : null;
-            }, null);
+            return ActivePlayer();
         }
 
         #endregion

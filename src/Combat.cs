@@ -480,7 +480,7 @@ namespace TerraInvictaMCP
         {
             if (combat == null) return JValue.CreateNull();
             var o = new JObject();
-            bool initialized = Safe<bool>(delegate { return combat.initialized; }, false);
+            bool initialized = Initialized(combat);
             o["initialized"] = initialized;
 
             TISpaceFleetState f1 = Safe<TISpaceFleetState>(
@@ -623,16 +623,11 @@ namespace TerraInvictaMCP
             return stance != null && stance.Value != CombatStance.NotYetSet;
         }
 
-        // A bid of zero is a real bid, so bids go by presence.
+        // A bid of zero is a real bid, so bids go by presence, which is what a
+        // non-null BidOf is: Num() never returns null, so a bid reads as a bid.
         static bool HasBid(TISpaceCombatState combat, TIFactionState faction)
         {
-            try
-            {
-                Dictionary<TIFactionState, float> bids = combat.bids_kps;
-                float bid;
-                return bids != null && bids.TryGetValue(faction, out bid);
-            }
-            catch (Exception) { return false; }
+            return BidOf(combat, faction).Type != JTokenType.Null;
         }
 
         static JToken BidOf(TISpaceCombatState combat, TIFactionState faction)
@@ -649,12 +644,11 @@ namespace TerraInvictaMCP
 
         static bool IsAI(TIFactionState faction)
         {
-            try
+            return Safe<bool>(delegate
             {
                 TIPlayerState player = faction.player;
                 return player == null || player.isAI;
-            }
-            catch (Exception) { return true; }
+            }, true);
         }
 
         static bool IsActivePlayer(TIFactionState faction)
@@ -897,8 +891,7 @@ namespace TerraInvictaMCP
 
         static bool Initialized(TISpaceCombatState combat)
         {
-            try { return combat.initialized; }
-            catch (Exception) { return false; }
+            return Safe<bool>(delegate { return combat.initialized; }, false);
         }
 
         static bool Simulated(TISpaceCombatState combat)
@@ -1019,10 +1012,15 @@ namespace TerraInvictaMCP
             JToken t = args["stance"];
             if (t == null || t.Type == JTokenType.Null) return -1;
             string s = t.ToString();
-            if (string.Equals(s, "Pursue", StringComparison.OrdinalIgnoreCase)) return (int)CombatStance.Pursue;
-            if (string.Equals(s, "Defend", StringComparison.OrdinalIgnoreCase)) return (int)CombatStance.Defend;
-            if (string.Equals(s, "Evade", StringComparison.OrdinalIgnoreCase)) return (int)CombatStance.Evade;
-            throw new VerbError("unknown stance '" + s + "' (Pursue, Defend, Evade)");
+            CombatStance v;
+            // Name back, because TryParse also takes "2"; only the three documented
+            // stances are choices (NotYetSet is the unanswered marker, the
+            // ExtendedPursuit members are a separate toggle the engine never lists).
+            if (!Enum.TryParse<CombatStance>(s, true, out v)
+                || !string.Equals(v.ToString(), s, StringComparison.OrdinalIgnoreCase)
+                || v < CombatStance.Pursue || v > CombatStance.Evade)
+                throw new VerbError("unknown stance '" + s + "' (Pursue, Defend, Evade)");
+            return (int)v;
         }
 
         // Main thread, once a frame. Every step is guarded so a throw disarms rather than
@@ -1264,10 +1262,10 @@ namespace TerraInvictaMCP
                     // RemovePromptStatic returns nothing and matches on all five
                     // fields, so whether it took anything is a before-and-after
                     // count rather than a return value.
-                    int before = BeginCombatPrompts();
+                    int before = FactionPromptsNamed("PromptBeginCombat");
                     TIPromptQueueState.RemovePromptStatic(
                         player, combat, null, "PromptBeginCombat", 0);
-                    return BeginCombatPrompts() < before;
+                    return FactionPromptsNamed("PromptBeginCombat") < before;
                 }
                 TIPromptQueueState queue = PromptQueue();
                 List<Prompt> standing = FactionPrompts(queue);
@@ -1303,12 +1301,6 @@ namespace TerraInvictaMCP
                 return ClearBeginCombatPrompt(precombat);
             }
             catch (Exception) { return false; }
-        }
-
-        // Standing PromptBeginCombat prompts on the active player's own list.
-        static int BeginCombatPrompts()
-        {
-            return FactionPromptsNamed("PromptBeginCombat");
         }
 
         // Standing prompts of one name on the active player's own faction list. Both
@@ -1362,30 +1354,22 @@ namespace TerraInvictaMCP
 
         static CombatStance Stance(TISpaceCombatState combat, TIFactionState faction)
         {
-            try
+            List<CombatStance> list = AllowedStances(combat, faction);
+            if (autoStance >= 0)
             {
-                Dictionary<TIFactionState, List<CombatStance>> allowed = combat.allowedStances;
-                List<CombatStance> list;
-                if (allowed != null && allowed.TryGetValue(faction, out list) && list != null)
+                for (int i = 0; i < list.Count; i++)
                 {
-                    if (autoStance >= 0)
-                    {
-                        for (int i = 0; i < list.Count; i++)
-                        {
-                            if ((int)list[i] == autoStance) return (CombatStance)autoStance;
-                        }
-                    }
-                    for (int i = 0; i < list.Count; i++)
-                    {
-                        if (list[i] == CombatStance.Defend) return CombatStance.Defend;
-                    }
-                    for (int i = 0; i < list.Count; i++)
-                    {
-                        if (list[i] != CombatStance.NotYetSet) return list[i];
-                    }
+                    if ((int)list[i] == autoStance) return (CombatStance)autoStance;
                 }
             }
-            catch (Exception) { }
+            for (int i = 0; i < list.Count; i++)
+            {
+                if (list[i] == CombatStance.Defend) return CombatStance.Defend;
+            }
+            for (int i = 0; i < list.Count; i++)
+            {
+                if (list[i] != CombatStance.NotYetSet) return list[i];
+            }
             // What the vanilla Autopilot submits when it drives the precombat screen.
             return CombatStance.Defend;
         }
@@ -1446,20 +1430,11 @@ namespace TerraInvictaMCP
         // combat.autoresolve owns it, fires it once, and refuses to fire it again. A
         // second door to it here would reintroduce exactly the double-apply this whole
         // machine guards against.
-        static readonly string[] PrecombatActions =
-            new string[] { "status", "close", "cancel", "reject", "live" };
-
         static JToken CombatPrecombat(JObject args)
         {
             string action = Str(args, "action");
             if (string.IsNullOrEmpty(action)) action = "status";
             action = action.ToLowerInvariant();
-            if (Array.IndexOf(PrecombatActions, action) < 0)
-                throw new VerbError("action must be one of "
-                    + string.Join(", ", PrecombatActions)
-                    + "; there is no 'accept' on purpose -- accepting an autoresolve "
-                    + "applies simulated damage to the real states and combat.autoresolve "
-                    + "owns that call so it happens exactly once");
 
             PrecombatController precombat = FindPrecombat();
             var o = new JObject();
@@ -1539,6 +1514,12 @@ namespace TerraInvictaMCP
                     o["warning"] = "the fight is now live rather than autoresolved, and "
                         + "no verb drives a live battle";
                     break;
+                default:
+                    throw new VerbError("action must be one of status, close, cancel, "
+                        + "reject, live; there is no 'accept' on purpose -- accepting "
+                        + "an autoresolve applies simulated damage to the real states "
+                        + "and combat.autoresolve owns that call so it happens exactly "
+                        + "once");
             }
             // Read back after the press: the caller's next decision is about what the
             // screen is now, not what it was.
@@ -1582,6 +1563,58 @@ namespace TerraInvictaMCP
 
         #region combat.stance
 
+        // The gate both stance paths take, in the order they both took it: a live
+        // controller, its canvas up, the autoresolve machine idle, a combat on the
+        // screen, and an active player GameControl agrees with who is in that combat.
+        //
+        // The canvas clause is the same gate combat.precombat takes, and for the same
+        // reason: the controller survives the screen, so with the canvas down it still
+        // holds a combat -- the finished one whose report was just closed, or a stale
+        // one while OnCombatInitiated defers the next -- and StanceSubmit would run on
+        // that, on behalf of a screen the player never saw. The autoPhase clause is
+        // two drivers on one screen: the machine's own SettleStep submits this same
+        // stance a step per frame, and a second submit races it into a second
+        // SelectCombatStance on the same combat. ControllerPlayer throws when the
+        // controller has no active player yet or holds one that is not the faction
+        // GameControl holds, because the buttons submit on behalf of the controller's
+        // activePlayer and a controller that has not caught up would answer for the
+        // wrong faction.
+        //
+        // Each caller keeps its own extra check: the stance argument here, the
+        // prompt-combat identity in the prompt answer.
+        static void StanceScreen(out PrecombatController precombat,
+                                 out TISpaceCombatState combat,
+                                 out TIFactionState player)
+        {
+            PrecombatController screen = FindPrecombat();
+            if (screen == null)
+                throw new VerbError("no precombat controller, so there is no screen to "
+                    + "submit a stance on; combat.status reports whether a combat is "
+                    + "pending at all");
+            if (!CanvasUp(screen))
+                throw new VerbError("the precombat canvas is not up, so the stance "
+                    + "button does not exist to press; nothing was submitted. "
+                    + "combat.precombat action=status reports the canvas and its "
+                    + "buttons, and combat.status what is pending");
+            if (autoPhase != AutoPhase.Idle)
+                throw new VerbError("combat.autoresolve is armed on combat "
+                    + autoCombatId + " and submits the stance itself a step per frame; "
+                    + "nothing was submitted here. Let it finish or fail first, then "
+                    + "read combat.status");
+            TISpaceCombatState onScreen = Safe<TISpaceCombatState>(
+                delegate { return screen.combat; }, null);
+            if (onScreen == null)
+                throw new VerbError("the precombat controller holds no combat, so "
+                    + "there is nothing to submit a stance for");
+            TIFactionState seated = ControllerPlayer(screen);
+            if (!Safe<bool>(delegate { return onScreen.IncludesFaction(seated); }, false))
+                throw new VerbError("faction " + StateName(seated) + " is not in combat "
+                    + (int)onScreen.ID + ", so it has no stance to submit");
+            precombat = screen;
+            combat = onScreen;
+            player = seated;
+        }
+
         // The player's own stance, submitted by hand, for a fight this harness is not
         // autoresolving. combat.autoresolve submits one on its way past; this is the
         // verb for the other case, where a person or a caller means to take the fight
@@ -1601,49 +1634,10 @@ namespace TerraInvictaMCP
             if (wanted < 0)
                 throw new VerbError("arg 'stance' is required: Pursue, Defend or Evade");
 
-            PrecombatController precombat = FindPrecombat();
-            if (precombat == null)
-                throw new VerbError("no precombat controller, so there is no screen to "
-                    + "submit a stance on; combat.status reports whether a combat is "
-                    + "pending at all");
-
-            // The same gate combat.precombat and the prompt answer take, and for the
-            // same reason: the controller survives the screen, so with the canvas
-            // down it still holds a combat -- the finished one whose report was just
-            // closed, or a stale one while OnCombatInitiated defers the next -- and
-            // StanceSubmit would run on that, on behalf of a screen the player never
-            // saw. The stance prompt that freezes the clock is answered from a canvas
-            // that is up.
-            if (!CanvasUp(precombat))
-                throw new VerbError("the precombat canvas is not up, so the stance "
-                    + "button does not exist to press; nothing was submitted. "
-                    + "combat.precombat action=status reports the canvas and its "
-                    + "buttons, and combat.status what is pending");
-
-            // Two drivers on one screen. The machine's own SettleStep submits this
-            // same stance a step per frame, and a second submit races it into a
-            // second SelectCombatStance on the same combat.
-            if (autoPhase != AutoPhase.Idle)
-                throw new VerbError("combat.autoresolve is armed on combat "
-                    + autoCombatId + " and submits the stance itself a step per frame; "
-                    + "nothing was submitted here. Let it finish or fail first, then "
-                    + "read combat.status");
-
-            TISpaceCombatState combat = Safe<TISpaceCombatState>(
-                delegate { return precombat.combat; }, null);
-            if (combat == null)
-                throw new VerbError("the precombat controller holds no combat, so "
-                    + "there is nothing to submit a stance for");
-
-            // Throws when the controller has no active player yet, or holds one that
-            // is not the faction GameControl holds -- the same two conditions the
-            // autoresolve machine refuses on, and for the same reason: the buttons
-            // submit on behalf of the controller's activePlayer, so a controller that
-            // has not caught up would answer for the wrong faction.
-            TIFactionState player = ControllerPlayer(precombat);
-            if (!Safe<bool>(delegate { return combat.IncludesFaction(player); }, false))
-                throw new VerbError("faction " + StateName(player) + " is not in combat "
-                    + (int)combat.ID + ", so it has no stance to submit");
+            PrecombatController precombat;
+            TISpaceCombatState combat;
+            TIFactionState player;
+            StanceScreen(out precombat, out combat, out player);
 
             List<CombatStance> allowed = AllowedStances(combat, player);
             if (!Allows(allowed, wanted))
@@ -1676,7 +1670,7 @@ namespace TerraInvictaMCP
             o["stancesSelected"] = Safe<JToken>(
                 delegate { return (JToken)combat.HaveStancesBeenSelected; },
                 JValue.CreateNull());
-            o["beginCombatPrompts"] = BeginCombatPrompts();
+            o["beginCombatPrompts"] = FactionPromptsNamed("PromptBeginCombat");
             if (submitted && promptsAfter == 0) return o;
             // Said rather than thrown: the submit has already run, and a throw would
             // lose the whole reply with it. The two ways this ends short are different
@@ -1696,8 +1690,8 @@ namespace TerraInvictaMCP
         // freezes the clock there.
         const string StancePrompt = "PromptSelectSpaceCombatStance";
 
-        // The engine's own answer to "what may this faction pick", read the way
-        // Stance() reads it. Never null: an unreadable table is an empty list, which
+        // The engine's own answer to "what may this faction pick", and what Stance()
+        // picks out of. Never null: an unreadable table is an empty list, which
         // refuses every stance rather than submitting into a combat that has no entry
         // for this faction.
         static List<CombatStance> AllowedStances(TISpaceCombatState combat,
@@ -1764,21 +1758,10 @@ namespace TerraInvictaMCP
         static string AnswerCombatStance(Prompt prompt, TIFactionState faction,
                                          JObject entry)
         {
-            PrecombatController precombat = FindPrecombat();
-            if (precombat == null)
-                throw new VerbError("no precombat controller, so no screen submits a "
-                    + "stance; combat.status reports what is pending");
-            if (!CanvasUp(precombat))
-                throw new VerbError("the precombat canvas is not up, so the stance "
-                    + "button does not exist to press");
-            if (autoPhase != AutoPhase.Idle)
-                throw new VerbError("combat.autoresolve is armed on combat "
-                    + autoCombatId + " and submits the stance itself");
-
-            TISpaceCombatState combat = Safe<TISpaceCombatState>(
-                delegate { return precombat.combat; }, null);
-            if (combat == null)
-                throw new VerbError("the precombat controller holds no combat");
+            PrecombatController precombat;
+            TISpaceCombatState combat;
+            TIFactionState player;
+            StanceScreen(out precombat, out combat, out player);
 
             // The prompt names its own combat and the screen need not be showing
             // it. SpaceCombatManager.CombatInit queues this prompt against each
@@ -1813,11 +1796,6 @@ namespace TerraInvictaMCP
                     + "OnCombatInitiated defers the new combat until it is closed; "
                     + "combat.precombat action=close closes it");
 
-            TIFactionState player = ControllerPlayer(precombat);
-            if (!Safe<bool>(delegate { return combat.IncludesFaction(player); }, false))
-                throw new VerbError("the controller's active player is not in combat "
-                    + (int)combat.ID);
-
             CombatStance pick = Stance(combat, player);
             if (!Allows(AllowedStances(combat, player), (int)pick))
                 throw new VerbError("combat " + (int)combat.ID + " allows this faction "
@@ -1842,21 +1820,6 @@ namespace TerraInvictaMCP
         #endregion
 
         #region fleet.bombard
-
-        // The three concrete BombardOperation subclasses differ only in the altitude
-        // they hand InitiateBombardment: TIGlobalConfig low/med/highBombardmentAltitude_km,
-        // 200/400/600 km on the shipped values. Closer is more damage per hit and more
-        // exposure to the target's own defenses.
-        static readonly Dictionary<string, Type> BombardTiers = BuildBombardTiers();
-
-        static Dictionary<string, Type> BuildBombardTiers()
-        {
-            var t = new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase);
-            t["low"] = typeof(BombardOperation_Low);
-            t["med"] = typeof(BombardOperation_Med);
-            t["high"] = typeof(BombardOperation_High);
-            return t;
-        }
 
         // Possible targets are listed in the refusal message; on Earth the list is every
         // region the fleet may hit, which is most of the map.
@@ -1949,24 +1912,39 @@ namespace TerraInvictaMCP
             return o;
         }
 
-        // The registry instance, never a fresh one: the interrupt check resolves a
-        // blocking operation's BreakthroughOps through this same dictionary and compares
-        // instances, and OperationData stores the instance for the cancel path, so a
-        // private copy would compare unequal to itself everywhere the engine looks.
+        // The three concrete BombardOperation subclasses differ only in the altitude
+        // they hand InitiateBombardment: TIGlobalConfig low/med/highBombardmentAltitude_km,
+        // 200/400/600 km on the shipped values. Closer is more damage per hit and more
+        // exposure to the target's own defenses.
         static BombardOperation BombardOp(string altitude)
         {
-            Type type;
-            if (!BombardTiers.TryGetValue(altitude, out type))
+            altitude = altitude.ToLowerInvariant();
+            Type type = altitude == "low" ? typeof(BombardOperation_Low)
+                      : altitude == "med" ? typeof(BombardOperation_Med)
+                      : altitude == "high" ? typeof(BombardOperation_High) : null;
+            if (type == null)
                 throw new VerbError("arg 'altitude' must be low, med or high");
+            return RegistryOp<BombardOperation>(type, "");
+        }
+
+        // The registry instance, never a fresh one: the interrupt check resolves a
+        // blocking operation's BreakthroughOps through this same dictionary and compares
+        // instances (IL_005c-IL_005d compares against `this`), and OperationData stores
+        // the instance for the cancel path, so a private copy would compare unequal to
+        // itself everywhere the engine looks. `note` is the caller's tail on the
+        // not-registered refusal.
+        static T RegistryOp<T>(Type type, string note) where T : class
+        {
             var lookup = OperationsManager.operationsLookup;
             IOperation op = null;
             if (lookup == null || !lookup.TryGetValue(type, out op) || op == null)
-                throw new VerbError("OperationsManager has no " + type.Name + " registered");
-            var bombard = op as BombardOperation;
-            if (bombard == null)
+                throw new VerbError("OperationsManager has no " + type.Name
+                    + " registered" + note);
+            T typed = op as T;
+            if (typed == null)
                 throw new VerbError("OperationsManager holds a " + op.GetType().Name
                     + " under " + type.Name);
-            return bombard;
+            return typed;
         }
 
         // Every clause ActorCanPerformOperation reads, reported as observed rather than
@@ -2387,28 +2365,15 @@ namespace TerraInvictaMCP
 
         #region fleet.transfer
 
-        // The registry instance, for the reason BombardOp above takes one:
-        // ActorCanPerformOperation's interrupt check resolves a blocking operation's
-        // BreakthroughOps through OperationsManager's own dictionary and compares
-        // instances (IL_005c-IL_005d compares against `this`), so a private copy is
-        // absent from every list it belongs to and would refuse a transfer the engine
-        // allows. OperationsManager.Initalize registers one TransferOperation into
+        // The registry instance, for the reason RegistryOp takes one.
+        // OperationsManager.Initalize registers one TransferOperation into
         // fleetOperations and keys the lookup by GetType(), so this entry exists
         // wherever a campaign is loaded.
         static TransferOperation TransferOp()
         {
-            var lookup = OperationsManager.operationsLookup;
-            IOperation op = null;
-            if (lookup == null || !lookup.TryGetValue(typeof(TransferOperation), out op)
-                || op == null)
-                throw new VerbError("OperationsManager has no TransferOperation "
-                    + "registered, so neither the fleet-side gate nor the target list "
-                    + "LaunchFleet's ValidOperation applies can be asked");
-            var transfer = op as TransferOperation;
-            if (transfer == null)
-                throw new VerbError("OperationsManager holds a " + op.GetType().Name
-                    + " under TransferOperation");
-            return transfer;
+            return RegistryOp<TransferOperation>(typeof(TransferOperation),
+                ", so neither the fleet-side gate nor the target list LaunchFleet's "
+                + "ValidOperation applies can be asked");
         }
 
         // Every clause TransferOperation.ActorCanPerformOperation reads, observed rather

@@ -2,9 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json.Linq;
 using PavonisInteractive.TerraInvicta;
+using CanvasManager = PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager;
 
 namespace TerraInvictaMCP
 {
@@ -92,8 +94,7 @@ namespace TerraInvictaMCP
             lastShotPath = path;
             lastShotRelative = ShotFolder + "/" + name;
             lastShotSupersize = supersize;
-            lastShotFrame = Safe<int>(
-                delegate { return UnityEngine.Time.frameCount; }, -1);
+            lastShotFrame = FrameCount();
             return ShotStatus(true);
         }
 
@@ -137,9 +138,8 @@ namespace TerraInvictaMCP
             // when two reads a moment apart return the same positive size.
             o["exists"] = bytes >= 0;
             o["bytes"] = bytes;
-            o["frames"] = lastShotFrame < 0 ? -1
-                : Safe<int>(delegate
-                    { return UnityEngine.Time.frameCount - lastShotFrame; }, -1);
+            int now = FrameCount();
+            o["frames"] = lastShotFrame < 0 || now < 0 ? -1 : now - lastShotFrame;
             return o;
         }
 
@@ -255,12 +255,12 @@ namespace TerraInvictaMCP
         // toggle actually reads is only reachable by reflection. MainMenu()
         // dereferences it and its OptionsScreen with no null test at IL_0001-IL_000b,
         // which is why the drive checks both before it presses anything.
-        static readonly System.Reflection.PropertyInfo canvasManagerProperty =
-            Safe<System.Reflection.PropertyInfo>(delegate
+        static readonly PropertyInfo canvasManagerProperty =
+            Safe<PropertyInfo>(delegate
             {
                 return typeof(CanvasControllerBase).GetProperty("canvasManager",
-                    System.Reflection.BindingFlags.NonPublic
-                    | System.Reflection.BindingFlags.Instance);
+                    BindingFlags.NonPublic
+                    | BindingFlags.Instance);
             }, null);
 
         static JToken UiOptions(JObject args)
@@ -349,8 +349,7 @@ namespace TerraInvictaMCP
                 null);
             if (manager == null)
                 return "the GeneralControlsController has no canvasManager";
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager typed =
-                manager as PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager;
+            CanvasManager typed = manager as CanvasManager;
             if (typed == null)
                 return "the GeneralControlsController's canvasManager is a "
                     + manager.GetType().Name + ", not a CanvasManager";
@@ -449,8 +448,7 @@ namespace TerraInvictaMCP
         {
             return Safe<OptionsScreenController>(delegate
             {
-                PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack =
-                    GameControl.canvasStack;
+                CanvasManager stack = GameControl.canvasStack;
                 return stack != null
                     ? stack.OptionsScreen as OptionsScreenController : null;
             }, null);
@@ -602,157 +600,122 @@ namespace TerraInvictaMCP
         // static over an installed module STATE and is what a hab's own panel
         // shows. One takes a data name and the other a state id. That is the
         // trap this verb has, so both refusals name it.
-        class Described
-        {
-            public string builder;      // engine method, quoted in a refusal
-            public string subjectName;  // what it ran on, quoted in a refusal
-            public JObject subject;
-            public Func<string> build;
-        }
-
-        class DescribeKind
-        {
-            public string kind;         // canonical, dotted
-            public Func<JObject, Described> resolve;
-        }
-
-        // One list rather than a dictionary plus a name table: three entries
-        // scan for free, and a second static field in a partial class would
-        // depend on an initializer order the language does not fix.
-        static readonly List<DescribeKind> describeKinds = BuildDescribeTable();
-
-        static List<DescribeKind> BuildDescribeTable()
-        {
-            var t = new List<DescribeKind>();
-            AddDescribeKind(t, "module.benefits", delegate(JObject args)
-            {
-                TIHabModuleTemplate module = DescribeModuleTemplate(args);
-                // Both optional and both meaningful when absent: a null hab is
-                // the "no hab yet" call the tech and build screens make, and
-                // the builder tests for it and substitutes reference bodies --
-                // Luna for the mass and prospective-power lines, Earth for the
-                // solar-output one. A null faction drops the faction-specific
-                // lines rather than failing.
-                TIFactionState faction = OptionalState<TIFactionState>(args, "faction");
-                TIHabState hab = OptionalState<TIHabState>(args, "hab");
-                bool prospective = Flag(args, "prospective");
-                RequireMiningInputs("module.benefits", module, faction, hab, null);
-                var d = new Described();
-                d.builder = "TIHabModuleTemplate.benefitsAndCostsDescription";
-                d.subjectName = module.dataName;
-                d.subject = new JObject();
-                d.subject["module"] = module.dataName;
-                d.subject["faction"] = faction != null
-                    ? Describe(faction) : JValue.CreateNull();
-                d.subject["hab"] = hab != null ? Describe(hab) : JValue.CreateNull();
-                d.subject["prospective"] = prospective;
-                d.build = delegate
-                {
-                    return module.benefitsAndCostsDescription(faction, hab, prospective);
-                };
-                return d;
-            });
-            AddDescribeKind(t, "module.summary", delegate(JObject args)
-            {
-                TIHabModuleState module = DescribeModuleState(args);
-                bool extended = Flag(args, "extended");
-                // FullSummary is not a separate builder tree. At IL_012f-IL_0142 it
-                // reads the module's own moduleTemplate, GetFaction() and hab and calls
-                // benefitsAndCostsDescription with all three, so both mining
-                // NullReferenceExceptions the kind above refuses by argument are
-                // reachable here through the module state instead. spawn.module bypasses
-                // ValidModuleForSlot, so a mining module on an orbital station -- a hab
-                // with no hab site -- is a pairing this harness can produce even though
-                // the game cannot, and describing it walks MonthlyResourceIncome into
-                // GetMiningIncome_Day's unguarded ref_habSite dereference at its
-                // IL_001d. Same refusal, named for this kind's own inputs.
-                RequireMiningInputs("module.summary",
-                    Safe<TIHabModuleTemplate>(
-                        delegate { return module.moduleTemplate; }, null),
-                    Safe<TIFactionState>(delegate { return module.GetFaction(); }, null),
-                    Safe<TIHabState>(delegate { return module.hab; }, null),
-                    module);
-                var d = new Described();
-                d.builder = "TIHabModuleState.FullSummary";
-                d.subjectName = "module " + (int)module.ID;
-                d.subject = new JObject();
-                d.subject["module"] = DescribeModule(module);
-                d.subject["extended"] = extended;
-                d.build = delegate
-                {
-                    return TIHabModuleState.FullSummary(module, extended);
-                };
-                return d;
-            });
-            AddDescribeKind(t, "project.unlocks", delegate(JObject args)
-            {
-                TIProjectTemplate project = DescribeProjectTemplate(args);
-                bool header = Flag(args, "header");
-                bool truncate = Flag(args, "truncate");
-                var d = new Described();
-                d.builder = "TIProjectTemplate.AllUnlocksDetails";
-                d.subjectName = project.dataName;
-                d.subject = new JObject();
-                d.subject["project"] = project.dataName;
-                d.subject["header"] = header;
-                d.subject["truncate"] = truncate;
-                d.build = delegate
-                {
-                    return project.AllUnlocksDetails(header, truncate);
-                };
-                return d;
-            });
-            return t;
-        }
-
-        static void AddDescribeKind(List<DescribeKind> t, string kind,
-            Func<JObject, Described> resolve)
-        {
-            var entry = new DescribeKind();
-            entry.kind = kind;
-            entry.resolve = resolve;
-            t.Add(entry);
-        }
+        static readonly string[] DescribeKindNames =
+            new string[] { "module.benefits", "module.summary", "project.unlocks" };
 
         static JToken UiDescribe(JObject args)
         {
             string kind = Str(args, "kind");
             if (string.IsNullOrEmpty(kind))
                 throw new VerbError("missing arg 'kind'; " + DescribeKinds());
+
+            // Resolution first and separately: a bad argument is a refusal naming the
+            // argument, never a builder throwing halfway through. `build` runs after
+            // the switch, inside the one catch that names the builder.
+            string name;                // canonical, dotted, echoed as `kind`
+            string builder;             // engine method, quoted in a refusal
+            string subjectName;         // what it ran on, quoted in a refusal
+            var subject = new JObject();
+            Func<string> build;
+
             // The same case- and punctuation-insensitive match ui.tooltip uses,
             // so "module.benefits", "moduleBenefits" and "Module Benefits" are
             // one kind.
-            string key = TooltipKey(kind);
-            DescribeKind entry = null;
-            for (int i = 0; i < describeKinds.Count; i++)
+            switch (TooltipKey(kind))
             {
-                if (string.Equals(TooltipKey(describeKinds[i].kind), key,
-                        StringComparison.Ordinal))
+                case "modulebenefits":
                 {
-                    entry = describeKinds[i];
+                    TIHabModuleTemplate module = DescribeModuleTemplate(args);
+                    // Both optional and both meaningful when absent: a null hab is
+                    // the "no hab yet" call the tech and build screens make, and
+                    // the builder tests for it and substitutes reference bodies --
+                    // Luna for the mass and prospective-power lines, Earth for the
+                    // solar-output one. A null faction drops the faction-specific
+                    // lines rather than failing.
+                    TIFactionState faction = OptionalState<TIFactionState>(args, "faction");
+                    TIHabState hab = OptionalState<TIHabState>(args, "hab");
+                    bool prospective = Flag(args, "prospective");
+                    RequireMiningInputs("module.benefits", module, faction, hab, null);
+                    name = "module.benefits";
+                    builder = "TIHabModuleTemplate.benefitsAndCostsDescription";
+                    subjectName = module.dataName;
+                    subject["module"] = module.dataName;
+                    subject["faction"] = faction != null
+                        ? Describe(faction) : JValue.CreateNull();
+                    subject["hab"] = hab != null ? Describe(hab) : JValue.CreateNull();
+                    subject["prospective"] = prospective;
+                    build = delegate
+                    {
+                        return module.benefitsAndCostsDescription(faction, hab, prospective);
+                    };
                     break;
                 }
+                case "modulesummary":
+                {
+                    TIHabModuleState module = DescribeModuleState(args);
+                    bool extended = Flag(args, "extended");
+                    // FullSummary is not a separate builder tree. At IL_012f-IL_0142 it
+                    // reads the module's own moduleTemplate, GetFaction() and hab and calls
+                    // benefitsAndCostsDescription with all three, so both mining
+                    // NullReferenceExceptions the kind above refuses by argument are
+                    // reachable here through the module state instead. spawn.module bypasses
+                    // ValidModuleForSlot, so a mining module on an orbital station -- a hab
+                    // with no hab site -- is a pairing this harness can produce even though
+                    // the game cannot, and describing it walks MonthlyResourceIncome into
+                    // GetMiningIncome_Day's unguarded ref_habSite dereference at its
+                    // IL_001d. Same refusal, named for this kind's own inputs.
+                    RequireMiningInputs("module.summary",
+                        Safe<TIHabModuleTemplate>(
+                            delegate { return module.moduleTemplate; }, null),
+                        Safe<TIFactionState>(delegate { return module.GetFaction(); }, null),
+                        Safe<TIHabState>(delegate { return module.hab; }, null),
+                        module);
+                    name = "module.summary";
+                    builder = "TIHabModuleState.FullSummary";
+                    subjectName = "module " + (int)module.ID;
+                    subject["module"] = DescribeModule(module);
+                    subject["extended"] = extended;
+                    build = delegate
+                    {
+                        return TIHabModuleState.FullSummary(module, extended);
+                    };
+                    break;
+                }
+                case "projectunlocks":
+                {
+                    TIProjectTemplate project = DescribeProjectTemplate(args);
+                    bool header = Flag(args, "header");
+                    bool truncate = Flag(args, "truncate");
+                    name = "project.unlocks";
+                    builder = "TIProjectTemplate.AllUnlocksDetails";
+                    subjectName = project.dataName;
+                    subject["project"] = project.dataName;
+                    subject["header"] = header;
+                    subject["truncate"] = truncate;
+                    build = delegate
+                    {
+                        return project.AllUnlocksDetails(header, truncate);
+                    };
+                    break;
+                }
+                default:
+                    throw new VerbError("unknown describe kind '" + kind + "'; "
+                        + DescribeKinds());
             }
-            if (entry == null)
-                throw new VerbError("unknown describe kind '" + kind + "'; "
-                    + DescribeKinds());
 
-            // Resolution first and separately: a bad argument is a refusal
-            // naming the argument, never a builder throwing halfway through.
-            Described described = entry.resolve(args);
             string text;
-            try { text = described.build(); }
+            try { text = build(); }
             catch (Exception e)
             {
-                throw new VerbError(described.builder + " threw for "
-                    + described.subjectName + ": " + Note(e));
+                throw new VerbError(builder + " threw for "
+                    + subjectName + ": " + Note(e));
             }
             if (text == null) text = "";
 
             var o = new JObject();
-            o["kind"] = entry.kind;
-            o["builder"] = described.builder;
-            o["subject"] = described.subject;
+            o["kind"] = name;
+            o["builder"] = builder;
+            o["subject"] = subject;
             // Untrimmed, both of them. These builders end in newlines the panel
             // relies on, and a character-exact assertion is the point of the
             // verb.
@@ -766,10 +729,7 @@ namespace TerraInvictaMCP
 
         static string DescribeKinds()
         {
-            var names = new List<string>();
-            for (int i = 0; i < describeKinds.Count; i++)
-                names.Add(describeKinds[i].kind);
-            return "kind is one of: " + string.Join(", ", names.ToArray());
+            return "kind is one of: " + string.Join(", ", DescribeKindNames);
         }
 
         // Two unguarded dereferences inside the builder, both gated on the template's
@@ -980,9 +940,8 @@ namespace TerraInvictaMCP
             // The vanilla ordering, and it matters: an info screen left up covers
             // the view that was just switched to, so a screenshot after this call
             // would photograph the screen rather than the map.
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack =
-                Safe<PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager>(
-                    delegate { return GameControl.canvasStack; }, null);
+            CanvasManager stack = Safe<CanvasManager>(
+                delegate { return GameControl.canvasStack; }, null);
             o["infoScreenClosed"] = false;
             if (stack != null && ActiveInfoScreenName(stack) != null)
             {
@@ -1092,26 +1051,26 @@ namespace TerraInvictaMCP
         //
         // The field is private initonly, so it is read by reflection, the same way
         // ui.options reads CanvasControllerBase.canvasManager.
-        static readonly System.Reflection.FieldInfo infoScreensField =
-            Safe<System.Reflection.FieldInfo>(delegate
+        static readonly FieldInfo infoScreensField =
+            Safe<FieldInfo>(delegate
             {
-                return typeof(PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager)
+                return typeof(CanvasManager)
                     .GetField("infoScreens",
-                        System.Reflection.BindingFlags.NonPublic
-                        | System.Reflection.BindingFlags.Instance);
+                        BindingFlags.NonPublic
+                        | BindingFlags.Instance);
             }, null);
 
         // SpaceObjectDetailController.selectedSpaceObject is private, and it is
         // what OnClickHabRename reads to decide whether to open the rename panel
         // at all. A rename press with no way to check it first would silently do
         // nothing on another faction's hab.
-        static readonly System.Reflection.FieldInfo selectedSpaceObjectField =
-            Safe<System.Reflection.FieldInfo>(delegate
+        static readonly FieldInfo selectedSpaceObjectField =
+            Safe<FieldInfo>(delegate
             {
                 return typeof(SpaceObjectDetailController)
                     .GetField("selectedSpaceObject",
-                        System.Reflection.BindingFlags.NonPublic
-                        | System.Reflection.BindingFlags.Instance);
+                        BindingFlags.NonPublic
+                        | BindingFlags.Instance);
             }, null);
 
         // Short names for the screens a test actually asks for. The full type name
@@ -1138,9 +1097,8 @@ namespace TerraInvictaMCP
 
         static JToken UiScreen(JObject args)
         {
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack =
-                Safe<PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager>(
-                    delegate { return GameControl.canvasStack; }, null);
+            CanvasManager stack = Safe<CanvasManager>(
+                delegate { return GameControl.canvasStack; }, null);
             if (stack == null)
                 throw new VerbError("GameControl has no canvasStack, so there are "
                     + "no screens to drive; nothing was changed");
@@ -1219,8 +1177,7 @@ namespace TerraInvictaMCP
 
         // show=<type name or alias>: the engine's own ShowInfoScreen<T>, reached
         // by MakeGenericMethod because the type is only known at run time.
-        static JToken ScreenShow(
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack,
+        static JToken ScreenShow(CanvasManager stack,
             string show, bool rename, JObject o)
         {
             o["action"] = "show";
@@ -1263,8 +1220,7 @@ namespace TerraInvictaMCP
         // own event. Its listener is queueable, so the screen comes up on a later
         // frame and the reply says so rather than claiming a screen that is not
         // there yet.
-        static JToken ScreenHab(JObject args,
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack,
+        static JToken ScreenHab(JObject args, CanvasManager stack,
             bool manage, string show, JObject o)
         {
             o["action"] = "hab";
@@ -1319,8 +1275,7 @@ namespace TerraInvictaMCP
         // screen that was up is still up when this returns and goes down a frame
         // later, and the reply says so instead of leaving the caller to guess
         // from an activeInfoScreen that is about to be wrong.
-        static JToken ScreenDetail(JObject args,
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack,
+        static JToken ScreenDetail(JObject args, CanvasManager stack,
             bool rename, JObject o)
         {
             o["action"] = "detail";
@@ -1344,7 +1299,9 @@ namespace TerraInvictaMCP
             detailOpenedFrame = FrameCount();
             o["detailPanelVisible"] = Safe<JToken>(
                 delegate { return (JToken)detail.Visible(); }, JValue.CreateNull());
-            o["selected"] = NameOrNull(SelectedDetailName(detail));
+            // StateName swallows a null state and answers null, which NameOrNull
+            // turns into a JSON null.
+            o["selected"] = NameOrNull(StateName(SelectedDetail(detail)));
 
             // Read back rather than reuse the value taken at the top of the verb:
             // the panel change is what queues the close, so both readings belong
@@ -1384,8 +1341,7 @@ namespace TerraInvictaMCP
             return Safe<int>(delegate { return UnityEngine.Time.frameCount; }, -1);
         }
 
-        static InfoPanel ActiveInfoPanel(
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack)
+        static InfoPanel ActiveInfoPanel(CanvasManager stack)
         {
             return Safe<InfoPanel>(delegate { return stack.GetActiveInfoPanel(); },
                                    default(InfoPanel));
@@ -1400,9 +1356,7 @@ namespace TerraInvictaMCP
         // panel was opened: that close is queued (see ScreenDetail), so a batch
         // holding detail= and rename=true in one frame would still read the old
         // screen as active and press the button of a screen on its way out.
-        static JToken ScreenRename(
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack,
-            JObject o)
+        static JToken ScreenRename(CanvasManager stack, JObject o)
         {
             o["action"] = "rename";
             string active = ActiveInfoScreenName(stack);
@@ -1431,9 +1385,7 @@ namespace TerraInvictaMCP
                 + "detail=<id>. Nothing was pressed");
         }
 
-        static void RenameOnHabitats(
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack,
-            JObject o)
+        static void RenameOnHabitats(CanvasManager stack, JObject o)
         {
             HabitatsScreenController habs = HabitatsController(stack);
             TIHabState shown = Safe<TIHabState>(
@@ -1463,8 +1415,7 @@ namespace TerraInvictaMCP
         // The instance CanvasManager registered, not whatever a scene search finds:
         // the registry entry is the one every engine path drives, and a search can
         // return an unregistered copy sitting on a disabled canvas.
-        static HabitatsScreenController HabitatsController(
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack)
+        static HabitatsScreenController HabitatsController(CanvasManager stack)
         {
             HabitatsScreenController habs = Safe<HabitatsScreenController>(delegate
             {
@@ -1489,7 +1440,7 @@ namespace TerraInvictaMCP
         static void RenameOnDetail(SpaceObjectDetailController detail, JObject o)
         {
             o["renamePanel"] = "SpaceObjectDetailController.renameHabPanel";
-            TIHabState shown = SelectedDetailHab(detail);
+            TIHabState shown = HabOf(SelectedDetail(detail));
             RefuseUnrenameableHabOnDetail(shown, detail);
             try { detail.OnClickHabRename(); }
             catch (Exception e)
@@ -1517,12 +1468,7 @@ namespace TerraInvictaMCP
         // press the engine would take, or take one the engine would refuse.
         static void RefuseUnrenameableHabOnHabitats(TIHabState hab)
         {
-            TIFactionState player = Safe<TIFactionState>(delegate
-            {
-                GameControl control = GameControl.control;
-                return control != null ? control.activePlayer : null;
-            }, null);
-            RefuseUnrenameableHab(hab, "habitats", player,
+            RefuseUnrenameableHab(hab, "habitats", ActivePlayer(),
                 "the active player GameControl holds");
         }
 
@@ -1562,23 +1508,21 @@ namespace TerraInvictaMCP
                     + "hab. Nothing was pressed");
         }
 
-        static void ShowScreen(
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack,
-            Type type)
+        static void ShowScreen(CanvasManager stack, Type type)
         {
-            System.Reflection.MethodInfo generic = Safe<System.Reflection.MethodInfo>(
+            MethodInfo generic = Safe<MethodInfo>(
                 delegate
                 {
-                    return typeof(PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager)
+                    return typeof(CanvasManager)
                         .GetMethod("ShowInfoScreen",
-                            System.Reflection.BindingFlags.Public
-                            | System.Reflection.BindingFlags.Instance);
+                            BindingFlags.Public
+                            | BindingFlags.Instance);
                 }, null);
             if (generic == null || !generic.IsGenericMethodDefinition)
                 throw new VerbError("CanvasManager has no generic ShowInfoScreen<T> "
                     + "method on this build, so no screen can be shown");
             try { generic.MakeGenericMethod(type).Invoke(stack, null); }
-            catch (System.Reflection.TargetInvocationException e)
+            catch (TargetInvocationException e)
             {
                 throw new VerbError("ShowInfoScreen<" + type.Name + "> threw: "
                     + Note(e.InnerException != null ? e.InnerException : e));
@@ -1594,9 +1538,7 @@ namespace TerraInvictaMCP
         // is handed to MakeGenericMethod: the IInfoScreen constraint, which
         // MakeGenericMethod itself throws on, and membership of the dictionary,
         // which get_Item throws on inside the call.
-        static Type ResolveScreen(
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack,
-            string wanted)
+        static Type ResolveScreen(CanvasManager stack, string wanted)
         {
             string name = wanted != null ? wanted.Trim() : null;
             if (string.IsNullOrEmpty(name))
@@ -1622,8 +1564,7 @@ namespace TerraInvictaMCP
                 + ". Short names also accepted: " + AliasList());
         }
 
-        static List<Type> ScreenTypes(
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack)
+        static List<Type> ScreenTypes(CanvasManager stack)
         {
             var found = new List<Type>();
             if (infoScreensField == null) return found;
@@ -1647,8 +1588,7 @@ namespace TerraInvictaMCP
             return found;
         }
 
-        static JArray ScreenNames(
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack)
+        static JArray ScreenNames(CanvasManager stack)
         {
             List<Type> keys = ScreenTypes(stack);
             var a = new JArray();
@@ -1690,8 +1630,7 @@ namespace TerraInvictaMCP
             return string.Join(", ", parts.ToArray());
         }
 
-        static string ActiveInfoScreenName(
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack)
+        static string ActiveInfoScreenName(CanvasManager stack)
         {
             return Safe<string>(delegate
             {
@@ -1701,8 +1640,7 @@ namespace TerraInvictaMCP
             }, null);
         }
 
-        static SpaceObjectDetailController DetailController(
-            PavonisInteractive.TerraInvicta.Systems.UI.CanvasManager stack)
+        static SpaceObjectDetailController DetailController(CanvasManager stack)
         {
             SpaceObjectDetailController detail =
                 Safe<SpaceObjectDetailController>(delegate
@@ -1715,23 +1653,14 @@ namespace TerraInvictaMCP
             return detail;
         }
 
-        static TIHabState SelectedDetailHab(SpaceObjectDetailController detail)
+        // The object the panel is pointed at. Callers reduce it: HabOf for the hab
+        // test, StateName for the readout.
+        static TIGameState SelectedDetail(SpaceObjectDetailController detail)
         {
             if (selectedSpaceObjectField == null) return null;
-            TIGameState selected = Safe<TIGameState>(
+            return Safe<TIGameState>(
                 delegate { return selectedSpaceObjectField.GetValue(detail)
                     as TIGameState; }, null);
-            return HabOf(selected);
-        }
-
-        static string SelectedDetailName(SpaceObjectDetailController detail)
-        {
-            if (selectedSpaceObjectField == null) return null;
-            return Safe<string>(delegate
-            {
-                var selected = selectedSpaceObjectField.GetValue(detail) as TIGameState;
-                return selected != null ? StateName(selected) : null;
-            }, null);
         }
 
         // The engine's own reduction: ViewSpaceObject dispatches a hab-typed object

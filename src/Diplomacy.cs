@@ -790,11 +790,7 @@ namespace TerraInvictaMCP
             JToken id = args != null ? args["faction"] : null;
             if (id != null && id.Type != JTokenType.Null)
                 return Arg<TIFactionState>(args, "faction");
-            TIFactionState player = Safe<TIFactionState>(delegate
-            {
-                GameControl control = GameControl.control;
-                return control != null ? control.activePlayer : null;
-            }, null);
+            TIFactionState player = ActivePlayer();
             if (player == null)
                 throw new VerbError("no active player faction to read relations "
                     + "for; pass 'faction' as a faction state id");
