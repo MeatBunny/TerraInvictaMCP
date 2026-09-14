@@ -1,8 +1,7 @@
 # Contributing
 
-We welcome patches. Start with an issue. See "Every change starts with an issue"
-below. Four things in this codebase look like defects. They are not. Please read
-these before you fix them.
+We welcome patches. Four things in this codebase look like defects. They are
+not. Please read these before you fix them.
 
 ## Empty catches are the design
 
@@ -153,19 +152,10 @@ about the ones you cannot run.
   drops every client's connection. This drives a real server and asserts the
   stream stays clean. Run it for any Python change. It needs no running game.
 - `python3 -m unittest discover -s server/tests` for any change under
-  `server/`. The suite drives modcheck's pure functions, its merge simulation
-  and all five checks against a synthetic install in a temporary directory;
-  the advance loop's decision helpers with the values the loop would have
-  computed; the JSON-RPC read loop against malformed client messages; the
-  bridge's failure paths and envelope contract against a loopback peer; the
-  tool table's annotations; and save discovery in both formats the game
-  writes. It needs no game, no bridge and no game assemblies, and a guard
-  enforces that rather than leaving it to the port being closed:
-  `server/tests/_offline.py` raises on any connection to the bridge port,
-  every module in `server/tests/` imports it, and `test_offline_guard` fails
-  if a new one does not. CI runs it on every PR. Some cases pin behavior that
-  is wrong on purpose and say so. Fixing one means changing its test in the
-  same diff.
+  `server/`. It needs no game, no bridge and no game assemblies, and a guard
+  fails a test module that reaches the bridge port. CI runs it on every PR.
+  Some cases pin behavior that is wrong on purpose and say so. Fixing one
+  means changing its test in the same diff.
 - `python3 server/modcheck.py [check] [mod]` for changes to modcheck. It is the
   debug entry. It runs without an MCP client. It needs the game running for
   the checks that read live state.
@@ -191,8 +181,7 @@ about the ones you cannot run.
 
 The [CI
 workflow](https://github.com/MeatBunny/TerraInvictaMCP/blob/main/.github/workflows/ci.yml)
-runs the offline checks on your PR. It is the authority on which ones. Read it
-if you want to know what will run before it runs.
+runs the offline checks on your PR and is the authority on which ones.
 
 ## Security reports
 

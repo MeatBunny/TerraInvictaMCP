@@ -33,7 +33,7 @@ Requests the agent can carry out once connected:
 ## Requirements
 
 - Terra Invicta 1.0.51 or later on the Steam public branch, Windows or
-  Linux (Proton). Linux is the primary development platform.
+  Linux (Proton).
 - **Unity Mod Manager 0.24 or later**, installed with the **Assembly**
   method. Download from
   [Nexus Mods](https://www.nexusmods.com/site/mods/21) (account required),
@@ -103,20 +103,9 @@ Run the installer again after every game update. It is idempotent.
 
 ### What the installer does
 
-1. Checks that it is inside a Terra Invicta install.
-2. Locates Python.
-3. Builds the DLL only when a source file is newer than it, which the
-   release zip never is.
-4. Checks the Unity Mod Manager injection. A game update reverts an Assembly
-   install; the installer reports it and names the fix, and on Linux repairs
-   it itself when `UMM_INSTALLER_DIR` points at the unpacked UMM installer
-   (see `./install.sh --help`).
-5. Registers the server with the MCP clients on PATH. Claude Code is
-   registered for the game folder without a prompt when it is the only
-   client found. OpenCode and Antigravity register globally, so each gets a
-   y/N prompt, default No.
-6. Runs an offline self-test of the server and prints the config snippet
-   for any other client.
+It checks the install, builds only when a source is newer than the DLL, checks
+the UMM injection, registers clients (see Registration), and self-tests the
+server.
 
 ## Registration
 
@@ -136,13 +125,6 @@ path filled in:
 ```json
 {"mcpServers": {"terra-invicta": {"command": "python3",
     "args": ["/path/to/Mods/Enabled/TerraInvictaMCP/server"]}}}
-```
-
-On Windows, with the Python launcher and doubled backslashes:
-
-```json
-{"mcpServers": {"terra-invicta": {"command": "py",
-    "args": ["-3", "C:\\path\\to\\Mods\\Enabled\\TerraInvictaMCP\\server"]}}}
 ```
 
 ## First use
@@ -169,33 +151,6 @@ say. The server hands the agent its operating manual
 
 The full guide, with examples and how to read the results:
 [docs/testing-your-mod.md](docs/testing-your-mod.md).
-
-## What the agent can do in a live game
-
-- **Set up any situation.** Spawn habs, modules, fleets, armies, councilors
-  and alien sites, or destroy them, design a ship class from named parts, and
-  force a nation's cohesion, democracy, inequality or education to a test value. These are fixtures:
-  they skip cost and prerequisites to prove a mechanism fires. A spawned
-  module still carries its real build cost, so anything downstream that
-  reads the price reads the right one.
-- **Run Earth politics without the UI.** National policies (Grant
-  Independence, unification, seeking peace) and faction diplomacy
-  (alliances, rivalries) are enacted directly. The game's own rules stay in
-  force, so a refusal names the condition that failed. A nuclear launch is
-  reachable the same way, only with an explicit confirmation, and there is
-  no undo.
-- **Collect evidence.** Screenshots are taken inside the game process, so
-  the image is the game even with the window buried. Nation panel tooltips
-  read back as text, so "did my number change" is a text comparison.
-- **Reach everything else.** Every player action in the engine is exposed
-  through one generic layer. Like the spawn fixtures it skips cost and
-  availability: it proves a mechanism works, never that a player could
-  reach it.
-
-The game's screen is view-only for the agent. It never clicks or types into
-the game window; every state change goes through a tool, a bridge verb, or
-a console command. The bridge is the TCP server this mod runs inside the
-game; a verb is one named request it answers.
 
 ## Safety and privacy
 
@@ -264,16 +219,12 @@ mods need it. UnityModManager.exe's Restore button reverts it.
 Everything from here down is for changing TerraInvictaMCP itself. Using it
 to test your own mods needs none of this.
 
-If you cloned the repo instead of downloading a release, you have no DLL yet.
-See [Building from source](#building-from-source) below, or grab the
-release zip.
-
 ### Building from source
 
-This is only needed if you change the in-game part. The source ships in the
-release zip and in the repo, so this works either way: `./build.sh` on
-Linux, `build.ps1` on Windows. Run either with `--help` (`-Help` on Windows)
-for its requirements and the environment variables it reads.
+Only needed if you change the in-game part; a clone has no DLL until you
+build one or take it from the release zip. `./build.sh` on Linux, `build.ps1`
+on Windows; run either with `--help` (`-Help` on Windows) for its
+requirements and the environment variables it reads.
 
 The build compiles against the game's own assemblies. These cannot be
 redistributed, so it needs a local install of the game -- and for the
@@ -306,70 +257,8 @@ things in this codebase that look like defects and are not.
 
 ### Verb families
 
-A map of what the bridge answers, for orientation:
-
-- **Liveness and discovery** (`ping`, `version`, `verbs`) -- is the bridge up,
-  what version is it, and what verbs does it serve. These answer with no
-  campaign loaded, so a client can feature-detect before doing anything.
-- **Read-only queries** (`query.*`, `mods.list`, `harmony.patches`,
-  `assets.*`, `ui.tooltip`, `ui.describe`) -- game state, templates, enums,
-  localization, scenarios, both mod loaders' records, and the text the
-  player reads: a nation-panel tooltip, or the long-form block behind a hab
-  module or a project. All as JSON. Nothing in this family changes the game.
-- **Time control** (`time.*`) -- pause, resume, set speed, and arm an
-  auto-pause at a date for unattended runs.
-- **Saves and campaign entry** (`saves.*`, `campaign.new`,
-  `game.main_menu`) -- list, write and load saves, start a new campaign
-  through the start screen's own controls, and put a loaded campaign back at
-  the start screen without restarting the game.
-- **Prompts and alerts** (`prompts.*`, `alert.choose`) -- read what is
-  freezing the clock, answer or clear it, or press a specific option button
-  on the open alert.
-- **Combat** (`combat.*`) -- start a fight, watch its status, submit its stance,
-  and resolve it headless the way the precombat screen's own buttons would.
-- **Ship designs** (`design.create`, `design.delete`, `design.auto`) -- build a
-  ship design from named parts and validate it, let the engine design one, or
-  remove one. The ship designer is a mouse-driven screen, so this is the only
-  way to ask headlessly whether a part combination is buildable: a modded weapon
-  on a vanilla hull, a refit with one part swapped, a drive the faction has not
-  researched. `spawn.fleet` then builds ships from what was saved.
-- **Fixtures** (`spawn.*`, `kill.module`, `nation.set_stat`, `fleet.land`,
-  `fleet.transfer`) -- put habs, modules, fleets, armies, councilors and
-  alien sites in place, take a module out, force a nation stat, land a fleet
-  on a hab site, or give one a transfer it has not launched yet, skipping
-  cost and prerequisites. A fixture proves a mechanism fires. It
-  never proves a player could reach it.
-- **Gated play** (`nation.policies`, `nation.set_policy`,
-  `faction.diplomacy`, `faction.relations`, `fleet.bombard`, `module.power`,
-  `hab.build_module`) -- enumerate and enact national policies, faction
-  diplomacy, faction hate, bombardment, module power and a hab module build
-  through the engine's own rules, so a refusal names the condition that
-  failed. Faction hate is the one piece of campaign state nothing else
-  reaches: no console command sets one, so any AI reaction keyed off it had no
-  way to be staged. The
-  module build is the paying counterpart to the `spawn.module` fixture: it
-  charges the owner and makes the engine's own upgrade-versus-new-build
-  decision.
-- **Evaluation without execution** (`mission.evaluate`) -- a contested
-  councilor mission's success chance and outcome bands, taken from the
-  engine's own resolver out of the mission phase. It writes no campaign
-  state, and rolling outcomes is the one thing here that touches the
-  campaign at all: it advances the RNG stream unless a seed is given.
-- **The generic action layer** (`action.list`, `action.invoke`) -- the
-  engine's whole player-action catalog by reflection, and a way to construct
-  and submit any entry in it. Like the fixtures, it bypasses cost and
-  availability.
-- **AI control** (`ai.control`) -- hand the player faction to the real
-  faction AI for unattended runs.
-- **Console and selection** (`console`, `select`) -- run a debug-console
-  command, and set the UI selection that selection-dependent commands read
-  as their target.
-- **Screenshots** (`ui.screenshot`) -- capture the game from inside the
-  process, so the image is the game even with the window buried.
-- **Screen and view control** (`ui.view`, `ui.screen`) -- switch between the
-  solar system and the political map, and open an info screen, the space
-  object detail panel or a rename panel, so a surface only a mouse used to
-  reach can be captured.
-
-This is orientation only. [docs/PROTOCOL.md](docs/PROTOCOL.md) is the
-contract: every verb, its arguments, and its gotchas.
+Liveness and discovery, read-only queries, time control, saves and campaign
+entry, prompts and alerts, combat, ship designs, fixtures, gated play,
+evaluation without execution, the generic action layer, AI control, console
+and selection, screenshots, screen and view control. Every verb, its
+arguments and its gotchas: [docs/PROTOCOL.md](docs/PROTOCOL.md).

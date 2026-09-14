@@ -3,18 +3,59 @@
 All notable changes to TerraInvictaMCP. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Removed
+
+- Offline tests a surviving test already covered: 560 to 410 tests.
+- Server dead code: reply-shape parsers for shapes the DLL never sends, the
+  `NARRATIVE_MODES` constant, `verdict()`, the optional modcheck import, the
+  disk save listing copied from modcheck, the mixed-version DLL defenses
+  (`_verb_names`, `_require`, the server-side `COMBAT_ARM_LIMIT`) and
+  compose's copy of the crash refusal, which the DLL makes.
+- modcheck: the fallback for a missing `bridge.py`, two of the three version
+  readers, `Compare.field` noops, the three-path bridge file probe, the online
+  duplicate of the static array warnings and the deduper that hid it, the
+  per-entry overlay fallback, unread `ModFile`, `Universe` and scenario
+  fields, `unchecked`/`classify_extras`, `scenarioResolution` and
+  `versionsMentioned`.
+- Documentation that restated another document: the README verb families and
+  live-game capability list, the AGENTS.md command list, SECURITY.md's copy of
+  the README, PROTOCOL.md's engine walk-throughs and QA history, the
+  playbook's third copies of verb semantics, and the CHANGELOG essays.
+- Tool descriptions: the parts that restated PROTOCOL.md mechanics.
+- The retired mission-phase clock hold in `AiControl.cs`:
+  `HoldClockForMissionPhase`, the `Held()` gates on `time.play` and
+  `time.speed`, and the two always-false `ai.control` status fields
+  `holdingClockForMissionPhase` and `holdBoundTripped`.
+- Scripts: the consent policy stated once, one server handshake instead of
+  two, one snippet printer, the release.sh sweeps for files its staging cannot
+  admit, the `zip` Python fallbacks.
+
+### Fixed
+
+- modcheck found no localization files for a mod that keeps them under a
+  subfolder such as `Localization/en/`, so every key was reported missing
+  offline; discovery walks subfolders.
+- The phantom-key check accepts the two vanilla key shapes that walk exposed
+  (faction-suffixed objectives, field-last narrative events).
+- The false "game on disk is 1.0.53" note on every cached modcheck run.
+
+### Changed
+
+- The "rebuild the DLL" hint keys on the DLL's own "unknown command" refusal.
+- DLL refusal and warning wording shortened (the `combat.autoresolve` re-arm
+  refusal, the `fleet.land` and `fleet.transfer` throw text, the
+  `kill.module` warnings); no change to which condition refuses.
+
 ## [0.1.2] - 2026-09-13
 
 ### Fixed
 
-- A JSON tool result over the 160,000-character limit was sliced mid-document
-  with a plain-text note appended, so the client received invalid JSON marked
-  `isError: false` (#12). `json_result` now replaces an oversized result with a
-  small valid `response_too_large` diagnostic carrying `textLength` and
-  `textLimit`, marked `isError: true`, and `handle_call` keeps that flag
-  instead of overwriting it with the handler's own `_failed` state. The handler
-  has already run when the limit trips, so the message says a state-changing
-  command may have completed and must not be retried blindly. Contributed by
+- A tool result over the 160,000-character limit was returned as invalid JSON
+  marked `isError: false` (#12). It now returns a valid `response_too_large`
+  error marked `isError: true`; the handler has already run, so a
+  state-changing command may have completed. Contributed by
   Laurentiu-Andronache (#13).
 
 ### Documentation
@@ -87,16 +128,7 @@ New arguments and fields on existing verbs and tools:
 
 - Every response envelope, success and error, carries `clockStall`,
   `campaignToken` and `campaignProcess`.
-- `query.time` reports `campaignToken`: a name for the campaign currently
-  loaded, minted by the DLL because nothing in the engine can supply one
-  (`ClearAllGameStates` restarts the id allocator, so a second campaign of a
-  scenario reuses every id). It changes on each transition into a campaign,
-  including the ones no verb ordered.
-- `campaignProcess`, on the envelope and on `query.time`: the token's prefix on
-  a key of its own, minted once at mod load, so it names the game process
-  answering and is a string even with no campaign loaded. The token alone
-  cannot say a game was replaced -- its counter restarts at 1 in each process
-  -- so this is what tells a new campaign from a new game.
+- `query.time` reports `campaignToken` and `campaignProcess`.
 - `alert.choose` reports `narrativeBox`: true when the option-button panel is
   on, false when it is off, null when the panel object could not be read, with
   `narrativeBoxNote` saying so.
@@ -148,28 +180,13 @@ New arguments and fields on existing verbs and tools:
 
 Server:
 
-- Pause limit. The DLL measures clock stall on every envelope. After five
-  minutes with no game-time gain (default; `TIBRIDGE_PAUSE_LIMIT` or
-  `pause_limit seconds=0` changes it) every state-changing tool is refused
-  with `PAUSE LIMIT EXCEEDED` and read-only tools run with a banner. Tools that
-  can move the clock or the game process are exempt. One continuous stall is
-  one violation however many calls it refuses.
-- Crash detection and recovery. `advance` reads the DLL's `crashed` flag,
-  stops the game, confirms the bridge is down, restarts with the newest save
-  of the run and stops with `crash_recovered`. A second crash without progress
-  is not retried.
 - Stale server code detection (`server/codestate.py`). Every loaded
   `server/*.py` is hashed at import and compared against disk on each tool
   dispatch. The MCP server is long-lived, so an edit changes nothing until the
   client reconnects; `observe` and `selftest` now say so.
-- `bridge.BridgeTimeout`, distinct from a dead bridge. Tools report
-  `GAME_BUSY` instead of "game is not running", and one timed-out poll inside
-  `advance` is one lost poll, not the end of the call.
 
 ### Changed
 
-- Version 0.1.0 to 0.1.1 in `ModInfo.json`, `src/Verbs.cs` and
-  `server/__main__.py`.
 - `advance` answers narrative events by default through the engine's own AI
   response selector and lists each one, where it used to stop dead. Only the
   alert box may answer: the prompt and the notification are two queue entries,
@@ -242,8 +259,6 @@ Server:
 - `design.create` checks the class name only when it is going to save. Under
   `save: false` nothing is registered and no name is taken, so a loadout can be
   validated under a name a design or a ship in play already holds.
-- `python3 -m unittest discover -s server/tests` is required for any change
-  under `server/`, not only `server/modcheck.py`.
 - `smoke_test` says `returnedToMenu` on each row that sent a loaded campaign
   back to the start screen. The return itself already ran for a named
   scenario as well as a sweep, and the row said nothing about it, so a
@@ -327,12 +342,9 @@ Server:
 - `Autopilot` detection read `isActiveAndEnabled`, which only says the class
   is loaded.
 - Everything the mod held about a campaign was cleared by hand in three verbs,
-  in three copies that had drifted, and by nothing at all on the paths that
-  use no verb. Leaving a campaign through the options screen and starting
-  another one from the start screen left the run target armed, the clock
-  parked, the autoresolve record standing and the mission-phase collision
-  count describing a campaign that no longer existed. One reset now runs from
-  the watchdog on both campaign transitions, and the verbs call the same one.
+  in three drifted copies, and not at all on the paths that use no verb. One
+  reset now runs from the watchdog on both campaign transitions, and the verbs
+  call the same one.
 - `game_start` cleared the autopilot macro flag even when it launched nothing.
   A call that only re-confirms the game is up, and a `load=` into a running
   game, both leave the macro running, and with the flag cleared `advance`
@@ -341,25 +353,14 @@ Server:
 - `smoke_test` started each scenario through the verb rather than the tool, so
   the counters and the run's recorded save still described the scenario
   before it.
-- `smoke_test` let a transport failure end the whole sweep. A game that
-  died in the first of six scenarios raised out of the loop: the rows
-  already collected went with it, and the five scenarios after it were
-  never started and never mentioned. Every per-scenario step catches one
-  now and records that scenario's row as `bridge_lost`, or `bridge_busy`
-  when the calls timed out, with `reached` naming the step it died in. The
-  next scenario relaunches the game the way a menu return that will not
-  complete already did, and a relaunch that cannot run is reported in the
-  row rather than raised.
-- `combat_autoresolve` read a failed `combat.status` poll as a status with
-  nothing armed in it, which is the shape of a clean resolve: a bridge that
-  stopped answering mid-wait produced `resolved: true`, and the orphan pass
-  then took the same empty status for "no combat left" and dropped the
-  begin-combat prompt of a fight still on screen. Failed polls are counted,
-  five consecutive ones end the wait with `resolved: false`, and the orphan
-  pass runs only on a status that was read. The stop reason is `bridge_busy`
-  when every unanswered poll timed out and `bridge_lost` otherwise, the same
-  split `advance` makes: the wait outlasts the verb timeout by design, so a
-  resolution that runs long is the likely cause of the first.
+- `smoke_test` let a transport failure end the whole sweep. Each scenario's
+  steps now catch one and record that row as `bridge_lost`, or `bridge_busy`
+  when the calls timed out, with `reached` naming the step; the next scenario
+  relaunches the game.
+- `combat_autoresolve` read a failed `combat.status` poll as a clean resolve.
+  Failed polls are counted, five consecutive ones end the wait with
+  `resolved: false` (`bridge_busy` when every poll timed out, `bridge_lost`
+  otherwise), and the orphan pass runs only on a status that was read.
 - The same wait's orphan pass read the precombat screen through the helper
   that answers None on a transport failure, so an unread screen counted as a
   canvas that is down -- the one reading that allows the prompt drop. The
@@ -378,35 +379,27 @@ Server:
   attempts alone and answering for the recorded combat whatever combat the
   reply was about. Both now read one predicate.
 - `time.run_until` refused an `ai.control` engagement's arm over an open
-  mission phase, while the driver skipped its own hold for that engagement --
-  so an engaged run met an open phase with nothing armed, no clock, and no
-  poll that would arm again. The engagement is exempt while its
-  `StartNewMissionPhase` prefix is installed, which is what makes the
-  collision impossible; without the prefix the refusal stands.
+  mission phase while the driver skipped its own hold, so an engaged run met
+  an open phase with nothing armed. The engagement is exempt while its
+  `StartNewMissionPhase` prefix is installed.
 - `advance` set full game speed before arming `run_until` and after a refused
   arm, which handed the clock back into the open mission phase the refusal
   withheld it from. The arm goes first, and a phase refusal now costs no
   speed change.
 - A campaign transition INTO a campaign reset everything the mod held about
-  one. The request queue drains before the per-frame tick, so a driver that
-  read `campaign: true` and armed `time.run_until` in that window was answered
-  `armed: true` and had the target discarded microseconds later. Only the
-  transition out resets now, which every teardown passes through.
+  one, discarding a `time.run_until` armed in the same frame. Only the
+  transition out resets now.
 - `query.time`'s `stall.sinceLastVerbSeconds` was always 0.0. It was measured
   from the current verb's own stamp, which is recorded before the verb runs,
   so the reply reported no silence however long the client had been away. It
   is measured from the previous verb now, and is null until a second verb has
   run.
-- A stall refresh that failed left the pause limit enforcing the reading it
-  was meant to replace, so a game that died mid-stall answered every tool with
-  `PAUSE LIMIT EXCEEDED` and counted a violation, instead of the error saying
-  the bridge was gone. An unreadable refresh is now unknown, and unknown
-  refuses nothing and records nothing.
-- `game_start` and `game_stop` left a campaign entry pending. A load ordered
-  into a game that then died bound its save to whatever campaign came up next,
-  which a crash recovery would have reloaded -- resuming a game nobody asked
-  for while reporting a recovery. Both forget it, and a save already bound to
-  another campaign is dropped rather than re-bound.
+- A stall refresh that failed left the pause limit enforcing the previous
+  reading, so a game that died mid-stall answered `PAUSE LIMIT EXCEEDED`. An
+  unreadable refresh is now unknown, and unknown refuses nothing.
+- `game_start` and `game_stop` left a campaign entry pending, so a load into
+  a game that then died bound its save to the next campaign up. Both forget
+  it.
 - `time speed="0"` was not read as a pause by the limit, so the one call that
   stops the clock got through under a stopped clock whenever a client sent the
   level as a string. The two sides of that argument now agree: the level is
@@ -429,109 +422,45 @@ Server:
   so a plain notification box carried the name and the whole `detail` block
   of the last story event answered. The narrative option-button panel is
   now what decides, and a notification box reports no event.
-- `alert.choose` pressed an option on a notification box and then reported
-  `answered: false`. Every press past the controller's guard builds a
-  `SelectNarrativeEventOption` from the record it holds, so that press
-  answered the last story event the campaign saw while the reply said it had
-  answered nothing. The press is refused instead. A null option-button panel
-  is refused as well and reported as `narrativeBox: null`: it used to read as
-  a notification box, which is a claim the reading cannot support.
-- `game_start` and `game_stop` were the only things that forgot a campaign
-  entry, so a game process this server did not replace kept one alive. A
-  person relaunching the game at the console left the run promising that the
-  next campaign token was the one it ordered, with a save from the dead
-  process behind it -- and the replacement game's first token, which its
-  counter restarts at 1, was taken for that campaign. The entry now records
-  the process it was ordered in and is dropped when `campaignProcess` says the
-  game is a different one, before any campaign comes up.
+- `alert.choose` pressed an option on a notification box, answering the last
+  story event the campaign saw, and reported `answered: false`. The press is
+  refused; a null option-button panel is refused too and reported as
+  `narrativeBox: null`.
+- A game process this server did not replace kept a campaign entry alive, so
+  the replacement game's first token was taken for the ordered campaign. The
+  entry records the process it was ordered in and is dropped when
+  `campaignProcess` changes.
 - `smoke_test` took its log scan inside the try, so the row for a scenario
-  that raised or lost the bridge carried no `newExceptions` and no
-  `logNoiseIgnored` -- the one row a reader goes to for an exception was the
-  one row with no log evidence on it. The scan is taken after the arms, and
-  every row carries both.
+  that raised carried no `newExceptions` and no `logNoiseIgnored`. The scan
+  runs after the arms and every row carries both.
 - `ui.screen show=habitats rename=true` showed the habitats screen and then
   refused the rename, leaving the caller with a screen change it had been
   told nothing was changed by. The hab and ownership checks now run first.
-- `advance`'s terminal crash message said the game had crashed again after
-  an automatic restart when no restart had run. The recovery budget survives
-  a campaign change and is spent when an attempt starts rather than when one
-  completes, so a run whose first recovery died at the stop, or that carried
-  a spent budget in from an earlier campaign, was told about a restart it
-  never had. A crash with no save of this run to reload now says that
-  instead, and the restart wording is kept for a restart that completed.
+- `advance`'s terminal crash message claimed a restart that never ran. A
+  crash with no save of this run to reload now says so, and the restart
+  wording is kept for a restart that completed.
 
 ### Documentation
 
-- `docs/PROTOCOL.md`: new "Ship designs" and "UI" sections, "A combat that
-  ends with nothing to accept", "Arming again after a failure", the crash
-  flag in the execution model, and a warning that `setfaction` is unsafe
-  while the game runs.
+- `docs/PROTOCOL.md`: new "Ship designs", "UI" and "Arguments" sections, "A
+  combat that ends with nothing to accept" and "Arming again after a failure".
 - `docs/playbook.md`: new "The pause limit", "Stop reasons", "Narrative
   events" and "Combat" sections.
-- `docs/PROTOCOL.md`: "Arming again after a failure" lists the five refusals
-  one by one, says that attempts alone refuse nothing, and says what clears
-  the record.
-- `docs/playbook.md`: the pause-limit section covers the `raw`/`batch`
-  allowlist, the `pause_limit` / `set_pause_limit` split and a reading that
-  cannot be taken; the stop-reason list names the six reasons that count
-  toward the stall refusal.
-- `docs/PROTOCOL.md`: the `time.run_until` row states the engagement
-  exemption and what it is conditional on, the `query.time` row states which
-  verb `sinceLastVerbSeconds` measures from, and the transport section says
-  that entering a campaign only mints the token.
-- `docs/PROTOCOL.md`: the `design.create` row states the class-name and
-  slot-collision refusals, the `spawn.fleet` row what an ambiguous display
-  name does, the `alert.choose` row what decides whether the controller's
-  narrative record describes the box on screen, and the `ui.screen` row the
-  order the habitats rename checks run in.
-- `docs/playbook.md`: a `smoke_test` sweep survives a game that dies inside
-  one scenario, and a named scenario returns a loaded campaign to the menu on
-  its own, so the tool can be called from inside a campaign.
-- `docs/PROTOCOL.md`: the `query.time` row says that `sinceLastVerbSeconds`
-  belongs to the game process rather than to the caller, and that its null
-  first reading is unobservable through the tools, because `game_start` and
-  `load_game` poll the bridge while they wait for the campaign. A tool call
-  with a cold verb cache sends `verbs` first, and the `--call` debug entry measures
-  from the previous debug call, so neither reads as the silence a persistent
-  client would see.
 - `docs/testing-your-mod.md`: "A stopped clock is treated as a stuck test".
 - `AGENTS.md`, `docs/CONTRIBUTING.md`: editing `server/*.py` does not reach an
-  already-started server; `selftest` reports it as `offline.serverCode`.
-- `docs/PROTOCOL.md`: a new "Arguments" section on how a verb reads its
-  arguments and what each refusal says; the transport section describes
-  `campaignProcess`; the `design.create` row states that the class-name check
-  is conditional on saving and gives the `fire_modes` item shape; the
-  `alert.choose` row states the press refusal and `narrativeBox`.
-- `docs/playbook.md`: the console section says the console is refused past the
-  pause limit, through `raw` as well, and names the way out.
+  already-started server.
 - `README.md` lists the new verbs.
 
 ### Tests and CI
 
-- 550 unit tests, all passing. New files: `test_advance`, `test_bridge`,
-  `test_codestate`, `test_combat`, `test_crash_fixture`, `test_jsonrpc`,
-  `test_offline_guard`, `test_overlay`, `test_pause_limit`, `test_saves`,
-  `test_schemas`, `test_selftest`, `test_smoke`, `test_tool_annotations`,
-  `test_tool_split`. `test_universe` extended.
-- The suite no longer reads a running game. Five cases dialed
-  127.0.0.1:17470 and passed only because the port was closed on the machine
-  that ran them; next to a paused campaign, four of them got that session's
-  PAUSE LIMIT banner or the live DLL's argument error in place of the payload
-  they had built. Each now holds a fake on both routes to the bridge:
-  `compose.bridge` for the stall reading and the campaign note that
-  `handle_call` takes before dispatch, and the `bridge` module itself for a
-  tool that dispatches a verb. `server/tests/_offline.py` arms a process-wide
-  guard that raises on any connection to the bridge port, and
-  `test_offline_guard` fails if a test module stops importing it.
-- `test_tool_annotations` enforces the `destructiveHint` rule across the
-  hand-written tool table: a tool that writes is destructive unless all it
-  moves is the clock or the camera.
-- `test_schemas` enforces the item-schema rule across the same table: an item
-  shape published by any tool states its required keys and closes itself to
-  extras, because a half-stated one validates a call the bridge will refuse.
-- CI step "no unicode dashes" fails a PR on U+2010 through U+2015 or U+2212
-  in source, docs, scripts and config. The unit-test step now covers all of
-  `server/tests`.
+- 550 offline unit tests: fifteen new test modules, `test_universe` extended.
+- The suite no longer reaches a running game: `server/tests/_offline.py`
+  raises on any connection to the bridge port, and `test_offline_guard` fails
+  a module that stops importing it.
+- `test_tool_annotations` enforces the `destructiveHint` rule and
+  `test_schemas` the item-schema rule across the tool table.
+- CI step "no unicode dashes" fails a PR on U+2010 through U+2015 or U+2212.
+  The unit-test step covers all of `server/tests`.
 
 ## [0.1.0] - 2026-08-25
 

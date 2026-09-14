@@ -4,9 +4,6 @@ This guide is for mod authors. You do not run these checks yourself --
 you ask your AI assistant for them in plain English. This page tells you what
 to ask for, what the answers mean, and how to fix common problems.
 
-In this guide, "ask" means tell your assistant in your own words. The exact
-phrasing does not matter.
-
 ## The five-minute check
 
 With your mod enabled, ask:

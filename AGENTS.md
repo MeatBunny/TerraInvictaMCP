@@ -1,23 +1,17 @@
 # Working in this repository
 
 `docs/CONTRIBUTING.md` controls contributions. Read it before you write anything
-you want to submit. It explains four of the five constraints
-below. It covers the fifth constraint, stdout hygiene, under "Before
-opening a PR".
+you want to submit.
 
 ## Layout
 
-- `src/` is the in-game C# 6 DLL. It runs the bridge, a small TCP server inside
-  the game. It answers verbs. Each verb is one named request. `server/` is the MCP
+- `src/` is the in-game C# 6 DLL that runs the bridge. `server/` is the MCP
   (Model Context Protocol, the standard AI assistants use to call outside tools)
   stdio server. It uses only the Python 3 standard library.
 - `docs/PROTOCOL.md` is the wire contract between them. It defines the
   verb names and payloads.
 
 ## Constraints, and where each is written down
-
-Each bullet shows where the rule lives. It also names the tool that
-enforces it.
 
 - Build `-nostdlib` against the game's own assemblies. The header comment of
   `build.sh` and `build.ps1` ("-nostdlib against the game's own assemblies is
@@ -40,29 +34,4 @@ enforces it.
 
 ## Commands
 
-- `./build.sh` (or `build.ps1`) writes the DLL where the game loads it. This is
-  the whole loop for a DLL change. Set `TI_ROOT` if the source lives outside your game
-  folder. `install.sh` also repairs the game install and registers MCP clients. Run
-  it when you want those tasks, not as part of a build.
-- Run `python3 server/stdio_selfcheck.py` after any Python change. It needs no running game.
-- Run `python3 -m unittest discover -s server/tests` after any change under
-  `server/`. It covers modcheck, the tool that checks a mod's templates merged
-  correctly into the game, against a synthetic install in a temporary directory; the
-  advance loop's decision helpers; the JSON-RPC read loop; the bridge's failure paths
-  and envelope contract; the tool table's annotations; and save discovery. It needs no
-  game and no bridge, and a new test module must `import _offline` so the guard that
-  refuses a connection to the bridge port is armed for it too.
-  `.github/workflows/ci.yml` runs it on every PR.
-- An edit to `server/*.py` does not reach a client that already started the
-  server. That Python process holds the code it read at launch until the
-  client reconnects it, and restarting the game reattaches the same stale one.
-  `selftest` reports this under `offline.serverCode` and fails the call;
-  `observe` names it when it happens.
-- `python3 server/modcheck.py [check] [mod]` is the debug entry for modcheck. It is the only
-  way to run modcheck without an MCP client.
-
-## Versions
-
-A wire-contract change is a mod version bump. The rule, the three files that state
-the version, and what catches drift are under "Before opening a PR" in
-`docs/CONTRIBUTING.md`. Release version numbers belong to the maintainer.
+Commands and checks: `docs/CONTRIBUTING.md`, "Before opening a PR".
