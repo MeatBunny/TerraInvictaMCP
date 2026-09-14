@@ -74,13 +74,6 @@ namespace TerraInvictaMCP
         // Candidate names quoted in a resolution failure, here and in action.invoke.
         const int MaxNamesListed = 20;
 
-        // Modifiers listed per side. The engine's own lists run to a handful,
-        // so this is a ceiling rather than a live cut -- but a list sold as the
-        // tuning lever must never be quietly short, so the engine's own count
-        // is reported beside each list the way rollsRequested is reported
-        // beside rolls, and a caller can compare it against maxModifiers.
-        const int MaxMissionModifiers = 64;
-
         // Effects are never claimed, in the voice action.invoke uses: this
         // reports the call it made and what came back, and nothing about
         // whether the mission could have been ordered.
@@ -184,32 +177,20 @@ namespace TerraInvictaMCP
             // Which resource the values below were computed with, so a caller
             // reading a ResourceSpent row can see why it reads Money or Ops.
             o["costResource"] = resource.ToString();
-            // The engine's own list lengths travel with the lists. Both are
-            // shorter than maxModifiers on every stock mission, and a caller
-            // reading a lever off a list has to be able to tell that from a
-            // list that was cut.
-            int attackingTotal, defendingTotal;
             string attackingError, defendingError;
             o["attackingModifiers"] = Modifiers(contested, mission, councilor,
-                target, resources, resource, true, out attackingTotal,
-                out attackingError);
+                target, resources, resource, true, out attackingError);
             o["defendingModifiers"] = Modifiers(contested, mission, councilor,
-                target, resources, resource, false, out defendingTotal,
-                out defendingError);
-            // -1 for a list the engine could not produce, never 0. A swallowed throw
-            // reported as an empty list with total 0 is byte-identical to a mission
-            // with no modifiers on that side, on the very field this pair exists to
-            // let a caller check the list against.
-            o["attackingModifiersTotal"] = attackingTotal;
-            o["defendingModifiersTotal"] = defendingTotal;
+                target, resources, resource, false, out defendingError);
+            // Non-null for a list the engine could not produce at all, which an empty
+            // list cannot say: a mission with no modifiers on that side answers the
+            // same empty array.
             o["attackingModifiersError"] = attackingError != null
                 ? (JToken)new JValue(attackingError) : JValue.CreateNull();
             o["defendingModifiersError"] = defendingError != null
                 ? (JToken)new JValue(defendingError) : JValue.CreateNull();
-            o["maxModifiers"] = MaxMissionModifiers;
             o["rollsRequested"] = rollsAsked;
             o["rolls"] = rolls;
-            o["maxRolls"] = MaxMissionRolls;
             o["seed"] = seeded ? (JToken)new JValue(seed) : JValue.CreateNull();
 
             // GetMissionOutcome recomputes the chance with reValidateTarget
@@ -366,9 +347,8 @@ namespace TerraInvictaMCP
         static JToken Modifiers(TIMissionResolution_Contested contested,
             TIMissionTemplate mission, TICouncilorState councilor,
             TIGameState target, float resources, FactionResource resource,
-            bool attacking, out int total, out string error)
+            bool attacking, out string error)
         {
-            total = 0;
             error = null;
             var a = new JArray();
             List<TIMissionModifier> list;
@@ -382,25 +362,18 @@ namespace TerraInvictaMCP
             }
             catch (Exception e)
             {
-                // Not a Safe fallback of null. An empty list beside total 0 is what a
-                // mission with no modifiers on this side answers, so a swallowed throw
-                // would be indistinguishable from it on the field a caller checks the
-                // list against.
-                total = -1;
+                // Not a Safe fallback of null. An empty list is what a mission with no
+                // modifiers on this side answers, so a swallowed throw would be
+                // indistinguishable from it without the error beside it.
                 error = Note(e);
                 return a;
             }
             if (list == null)
             {
-                total = -1;
                 error = "the engine returned no list";
                 return a;
             }
-            // What the engine handed over, before the cap and before the null
-            // entries the loop skips: this is the number maxModifiers is worth
-            // comparing against.
-            total = list.Count;
-            for (int i = 0; i < list.Count && i < MaxMissionModifiers; i++)
+            for (int i = 0; i < list.Count; i++)
             {
                 TIMissionModifier modifier = list[i];
                 if (modifier == null) continue;

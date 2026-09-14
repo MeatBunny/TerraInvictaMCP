@@ -314,9 +314,9 @@ prompt is not: it is the canvas that freezes the clock.
 `combat_start`, is the whole recipe. The engine promotes the combat a frame or
 more later, so until then `combat_status` reports `fleets: [null, null]` and
 `hab: null` on a healthy combat. Read `promotion` beside them, not `fleets`:
-`willPromote: false` right after `combat_start` means the engine deleted the
-combat, and the fix is the fixture. `blockedBy` is diagnostic-only; no call
-sequence here reaches a failing gate.
+it carries the engine's own cached fleet and hab references, and a combat that
+vanishes right after `combat_start` was deleted by the engine, so the fix is
+the fixture.
 
 A failed autoresolve is not simply retried: `combat_autoresolve` refuses a
 re-arm after a one-shot fired, a stable error, a closing-phase stall or a
@@ -333,8 +333,9 @@ the combat gone with no canvas left, and the tool drops it afterwards **only
 with the canvas down** and only when both the status and the screen were
 read. `bridge_busy` there means the polls timed out with the game up, and
 another `combat_autoresolve` on the same combat re-enters the wait without
-arming again. `promotionAtArming` in the report says whether the engine
-deleted the combat rather than fought it.
+arming again. A combat that ends with nothing to accept has two causes; the
+"A combat that ends with nothing to accept" section of `ti://docs/protocol`
+names them.
 
 **When it refuses, do not drop the prompt.** The precombat canvas freezes the
 clock, and only a button takes it down. `combat_precombat action=status`

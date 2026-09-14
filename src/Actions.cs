@@ -254,38 +254,14 @@ namespace TerraInvictaMCP
             return "unsupported";
         }
 
-        static readonly Dictionary<string, string> PrimitiveNames = BuildPrimitiveNames();
-
-        static Dictionary<string, string> BuildPrimitiveNames()
-        {
-            var d = new Dictionary<string, string>(StringComparer.Ordinal);
-            d["Boolean"] = "bool";
-            d["Byte"] = "byte";
-            d["SByte"] = "sbyte";
-            d["Int16"] = "short";
-            d["UInt16"] = "ushort";
-            d["Int32"] = "int";
-            d["UInt32"] = "uint";
-            d["Int64"] = "long";
-            d["UInt64"] = "ulong";
-            d["Single"] = "float";
-            d["Double"] = "double";
-            d["Decimal"] = "decimal";
-            d["String"] = "string";
-            d["Char"] = "char";
-            return d;
-        }
-
         // Source-shaped, because the caller reads it to decide what to pass: generic
         // arguments expanded, a nested type qualified by its declaring type (the
-        // AbortReason case), primitives under their keywords.
+        // AbortReason case).
         static string TypeLabel(Type t)
         {
             if (t == null) return "?";
             if (t.IsArray) return TypeLabel(t.GetElementType()) + "[]";
             string name = t.Name;
-            string keyword;
-            if (!t.IsNested && PrimitiveNames.TryGetValue(name, out keyword)) return keyword;
             if (t.IsGenericType)
             {
                 int tick = name.IndexOf('`');

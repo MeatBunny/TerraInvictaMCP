@@ -73,29 +73,6 @@ namespace TerraInvictaMCP
             var a = new JArray();
             for (int i = 0; i < ships.Count; i++) a.Add(Describe(ships[i]));
             o["ships"] = a;
-
-            // Every ship this call made lands in the fleet CreateAtRunTime just built, and
-            // that fleet is what it returns on every path (IL_03af). Nothing folds it into a
-            // fleet already at the location: with parentFleet null the only ship movement is
-            // AddShipsToFleet onto the new fleet at IL_00e4, and AddShipToFleet adds each ship
-            // unconditionally. A second fleet in the same orbit only has its mean anomaly
-            // nudged by TIOrbitState.TestAndCorrectAnomalyToAvoidOverlap so the two do not
-            // overlap on the map. Merging is an explicit order (MergeFleetOperation) or a
-            // combat-start fold of allied fleets (TISpaceFleetState.InitiateCombat).
-            //
-            // shipsTotal is therefore the engine's own count of the fleet it handed back, and
-            // it equals the number of ships created. 'merged' is the canary for that stopping
-            // being true: it appears only when the counts disagree, which would mean the
-            // engine gave back a fleet holding ships this call never made.
-            int total = -1;
-            try
-            {
-                List<TISpaceShipState> aboard = fleet.ships;
-                if (aboard != null) total = aboard.Count;
-            }
-            catch (Exception) { }
-            o["shipsTotal"] = total >= 0 ? (JToken)new JValue(total) : JValue.CreateNull();
-            if (total >= 0 && total != ships.Count) o["merged"] = true;
             return o;
         }
 
@@ -269,29 +246,7 @@ namespace TerraInvictaMCP
             // the cached assets fail its gate. Reporting the gate here is what turns
             // that silent disappearance into an answer at the call that caused it.
             // See PromotionGate.
-            JToken promotion = PromotionGate(combat);
-            o["promotion"] = promotion;
-
-            // The assertion behind PromotionGate's reachability argument. Every gate
-            // clause is supposed to be dominated by a refusal above, so a blocked gate
-            // HERE means one of those refusals stopped covering its clause -- a bridge
-            // bug or an engine change. It is surfaced at the top of the response rather
-            // than left inside `promotion`, because the call otherwise looks like a
-            // success and the combat is silently archived on the next frame.
-            var gate = promotion as JObject;
-            if (gate != null && gate["willPromote"] != null
-                && gate["willPromote"].Type == JTokenType.Boolean
-                && !(bool)gate["willPromote"])
-            {
-                o["gateFailed"] = true;
-                o["warning"] = "this combat will be archived unpromoted on the engine's "
-                    + "next frame: " + (gate["blockedBy"] != null
-                        && gate["blockedBy"].Type == JTokenType.String
-                        ? (string)gate["blockedBy"] : "see promotion")
-                    + ". combat.start's own refusals are meant to make that unreachable, "
-                    + "so this is a bridge bug or an engine change -- report it with the "
-                    + "promotion block below";
-            }
+            o["promotion"] = PromotionGate(combat);
             return o;
         }
 
@@ -404,78 +359,19 @@ namespace TerraInvictaMCP
             return o;
         }
 
-        // The engine's own promotion gate, read off the cached assets combat.start
-        // wrote, plus the assets themselves.
+        // The assets combat.start cached, which is the only thing a combat has
+        // before the engine promotes it.
         //
-        // This exists because `fleets` and `hab` above are EMPTY for a combat that is
-        // perfectly healthy and simply has not been promoted yet, and a status poll
-        // taken right after combat.start is exactly that case.
-        // TISpaceFleetState.InitiateCombat ends at
+        // `fleets` and `hab` above are EMPTY for a combat that is perfectly healthy and
+        // simply has not been promoted yet, and a status poll taken right after
+        // combat.start is exactly that case. TISpaceFleetState.InitiateCombat ends at
         // CacheCombatAssets(this, targetFleet, hab) (IL_0651) and returns; the real
         // fields -- fleets[0], fleets[1], factions and hab -- are written only by
-        // TISpaceCombatState.InitializeCombat (fleets[0] at its IL_0052, fleets[1] at
-        // IL_008f, hab at IL_0092), whose one caller is
-        // TISpaceCombatState.StartCombatFromStrategyLayer at IL_036f. That method runs
-        // one combat per frame from SimulationTimeTick.OnUpdate (IL_00bf), whatever the
-        // clock speed and whether or not it is paused, and only while
-        // GameControl.solarSystem is enabled and no precombat canvas is up. So
-        // `fleets: [null, null], hab: null` on an uninitialized combat means "not
-        // promoted yet", not "no second fleet and no hab".
-        //
-        // The gate itself, clause for clause, from StartCombatFromStrategyLayer
-        // IL_0000-IL_0192:
-        //
-        //   fleet1  Valid(cachedFleet1)
-        //             && (cachedFleet1.ships.Count > 0
-        //                 || allowNoAttackingFleetAtInitialization)
-        //   fleet2  Valid(cachedFleet2) && cachedFleet2.ships.Count > 0
-        //   hab     Valid(cachedHab); an invalid one is nulled in place at IL_0063
-        //
-        // then fleet1 must hold (IL_0068), fleet2 || hab must hold (IL_0070), and the
-        // faction list -- cachedFleet1's, plus cachedFleet2's when fleet2 holds, else
-        // cachedHab's coreFaction -- must contain no null (IL_0189) and be exactly two
-        // long (IL_0192). Fail any of those and the method archives the combat, removes
-        // it from the GameStateManager and calls SpaceCombatManager.SetCombat(null)
-        // (IL_0459-IL_0473). InitializeCombat never runs, Autoresolve is never reached,
-        // and the combat is simply gone the next frame.
-        //
-        // So a genuine two-fleet fight needs both fleets valid, both carrying at least
-        // one ship, and their factions distinct and non-null. combat.start already
-        // refuses the same-faction pair; the rest is what this reports.
-        //
-        // `blockedBy` is DIAGNOSTIC-ONLY: no sequence of bridge calls produces it.
-        // Each clause is dominated by a refusal that fires earlier, and the window in
-        // which a failing gate could be observed does not exist.
-        //
-        //   cachedFleet1 null or not Valid -- InitiateCombat passes `this` straight
-        //     through to CacheCombatAssets (IL_0644), and combat.start's `attacker`
-        //     had to resolve as a live TISpaceFleetState to get there.
-        //   cachedFleet2 null -- InitiateCombat nulls its target only when the caller
-        //     passed null or a `deleted` state (IL_0029-IL_003d), and combat.start
-        //     requires a `defender` that resolves.
-        //   either fleet with no ships -- spawn.fleet enforces ships 1..20, and no
-        //     verb empties a fleet without deleting the fleet with it.
-        //   a null faction -- FleetFaction refuses both sides first.
-        //   a faction count other than 2 -- the same-faction refusal rules out 1, and
-        //     AddUniqueFaction adds at most one entry beyond fleet1's.
-        //
-        // Nor can the gate be caught failing later. Promotion is not deferrable:
-        // SimulationTimeTick.OnUpdate reaches the promotion scan at IL_007d down both
-        // arms of its Paused test (IL_0034/IL_0039 gates only the idle-AI block), so a
-        // combat created by combat.start is promoted or archived before any subsequent
-        // bridge call can read it. The one state that skips the scan --
-        // SpaceCombatManager.HasActiveState() true, IL_0083/IL_0088 -- is exactly the
-        // state in which InitiateCombat parks the request on the fleet's
-        // waitingToInitiateCombatDatas and returns false (IL_00f0-IL_01c4) without
-        // creating a TISpaceCombatState at all, so there is no combat to read a gate
-        // off. That is why combat.start reports `queued` there and a null `promotion`.
-        //
-        // The clauses are still reported, because a combat the BRIDGE did not start --
-        // an engine or AI attack, or a parked request draining when the current combat
-        // clears -- can fail them, and combat.status is then the only thing that says
-        // why the combat vanished. Nothing schedules that, so there is no fixture for
-        // it and none should be written. CombatStart asserts the analysis above
-        // instead: a blocked gate at that call site contradicts it, and says so.
+        // TISpaceCombatState.InitializeCombat, whose one caller is
+        // TISpaceCombatState.StartCombatFromStrategyLayer, run one combat per frame from
+        // SimulationTimeTick.OnUpdate whatever the clock speed and whether or not it is
+        // paused. So `fleets: [null, null], hab: null` on an uninitialized combat means
+        // "not promoted yet", not "no second fleet and no hab".
         static JToken PromotionGate(TISpaceCombatState combat)
         {
             if (combat == null) return JValue.CreateNull();
@@ -495,66 +391,6 @@ namespace TerraInvictaMCP
             o["cachedFleet2"] = CachedFleet(f2);
             o["cachedHab"] = hab != null ? Describe(hab) : (JToken)JValue.CreateNull();
             o["allowNoAttackingFleetAtInitialization"] = allowNoAttacker;
-
-            // TIGameState.Valid is the engine's own test (non-null and `exists`), asked
-            // rather than reproduced.
-            bool f1Valid = Safe<bool>(delegate { return TIGameState.Valid(f1); }, false);
-            bool f2Valid = Safe<bool>(delegate { return TIGameState.Valid(f2); }, false);
-            bool habValid = Safe<bool>(delegate { return TIGameState.Valid(hab); }, false);
-            int f1Ships = ShipCount(f1);
-            int f2Ships = ShipCount(f2);
-
-            bool fleet1Ok = f1Valid && (f1Ships > 0 || allowNoAttacker);
-            bool fleet2Ok = f2Valid && f2Ships > 0;
-
-            var factions = new List<TIFactionState>();
-            factions.Add(Safe<TIFactionState>(delegate { return f1.faction; }, null));
-            if (fleet2Ok)
-                AddUniqueFaction(factions,
-                    Safe<TIFactionState>(delegate { return f2.faction; }, null));
-            else if (habValid)
-                AddUniqueFaction(factions,
-                    Safe<TIFactionState>(delegate { return hab.coreFaction; }, null));
-
-            var names = new JArray();
-            bool anyNull = false;
-            for (int i = 0; i < factions.Count; i++)
-            {
-                if (factions[i] == null) { anyNull = true; names.Add(JValue.CreateNull()); }
-                else names.Add(Describe(factions[i]));
-            }
-            o["factions"] = names;
-
-            string blocked = null;
-            if (!fleet1Ok)
-                blocked = "cachedFleet1 " + (f1 == null ? "is null"
-                    : !f1Valid ? "is not Valid (deleted or archived)"
-                    : "has no ships and allowNoAttackingFleetAtInitialization is false");
-            else if (!fleet2Ok && !habValid)
-                blocked = "neither side of the fight survives the gate: cachedFleet2 "
-                    + (f2 == null ? "is null"
-                        : !f2Valid ? "is not Valid (deleted or archived)"
-                        : "has no ships")
-                    + " and cachedHab " + (hab == null ? "is null" : "is not Valid");
-            else if (anyNull)
-                blocked = "one of the combat's factions is null";
-            else if (factions.Count != 2)
-                blocked = "the combat has " + factions.Count + " distinct faction"
-                    + (factions.Count == 1 ? "" : "s") + " and the engine requires "
-                    + "exactly 2";
-
-            // Once initialized the gate has already been passed and these cached
-            // fields are history, so the verdict is reported as spent rather than as a
-            // prediction about a promotion that has happened.
-            o["willPromote"] = initialized ? (JToken)JValue.CreateNull()
-                : new JValue(blocked == null);
-            o["blockedBy"] = blocked != null && !initialized
-                ? (JToken)new JValue(blocked) : JValue.CreateNull();
-            o["note"] = initialized
-                ? "this combat is already initialized, so the gate has been passed and "
-                  + "the cached assets above are what it passed with"
-                : "not promoted yet: `fleets` and `hab` stay empty until "
-                  + "StartCombatFromStrategyLayer runs, one combat per frame";
             return o;
         }
 
@@ -580,16 +416,6 @@ namespace TerraInvictaMCP
                 List<TISpaceShipState> ships = fleet.ships;
                 return ships != null ? ships.Count : -1;
             }, -1);
-        }
-
-        // EnumerableExtensions.AddUnique, which the engine uses here, compares with
-        // TIGameState's own equality operator rather than with List.Contains's default
-        // comparer, so the membership test is written out to match it.
-        static void AddUniqueFaction(List<TIFactionState> list, TIFactionState faction)
-        {
-            for (int i = 0; i < list.Count; i++)
-                if (list[i] == faction) return;
-            list.Add(faction);
         }
 
         static TIFactionState[] CombatFactions(TISpaceCombatState combat)
@@ -715,12 +541,6 @@ namespace TerraInvictaMCP
         // The phase is still carried, because it is what a report should name and what
         // says how far the machine got.
         static int autoHistoryCombatId = -1;
-        // The engine's promotion gate as it read at the moment this combat was armed.
-        // It has to be a snapshot: the gate is decided from the combat's cached
-        // assets, and a combat that fails it is archived AND removed from the
-        // GameStateManager in the same call, so by the time the tick notices it is
-        // gone there is nothing left to read the reason off. See PromotionGate.
-        static JToken autoHistoryGate;
         static AutoPhase autoReached;
         static AutoFail autoErrorKind;
         static int autoAttempts;
@@ -789,7 +609,6 @@ namespace TerraInvictaMCP
                     autoAttempts = 0;
                     autoFiredSelect = false;
                     autoFiredAccept = false;
-                    autoHistoryGate = null;
                 }
                 autoAttempts++;
                 autoCombatId = (int)combat.ID;
@@ -797,9 +616,6 @@ namespace TerraInvictaMCP
                 autoError = null;
                 autoNote = null;
                 autoStance = ParseStance(args);
-                // Taken before the first tick, because a combat the engine refuses to
-                // promote is archived and removed in one call and cannot be read after.
-                autoHistoryGate = PromotionGate(combat);
                 // A combat already carrying a simulation only needs the apply step.
                 autoPhase = Simulated(combat) ? AutoPhase.Simulating : AutoPhase.Settling;
                 Reached(autoPhase);
@@ -953,16 +769,6 @@ namespace TerraInvictaMCP
             o["retryable"] = Retryable(combat);
             o["firedAutoresolveSelected"] = autoFiredSelect;
             o["firedAcceptAutoresolve"] = autoFiredAccept;
-            // The engine's promotion gate as it read when this combat was armed. It
-            // is the only surviving evidence of why a combat vanished before the
-            // machine reached its accept step, because the refusal archives the
-            // combat and removes it in one call.
-            // Cloned rather than handed over: a JToken carries one parent, so the
-            // first status call would adopt the stored snapshot into a response that
-            // is then thrown away, and every later call would be reading a token
-            // parented somewhere else.
-            o["promotionAtArming"] = autoHistoryGate != null
-                ? autoHistoryGate.DeepClone() : JValue.CreateNull();
             return o;
         }
 
@@ -997,7 +803,6 @@ namespace TerraInvictaMCP
         static void ResetHistory()
         {
             autoHistoryCombatId = -1;
-            autoHistoryGate = null;
             autoReached = AutoPhase.Idle;
             autoErrorKind = AutoFail.Unknown;
             autoAttempts = 0;
@@ -1074,8 +879,7 @@ namespace TerraInvictaMCP
                         : "";
                     Disarm();
                     autoNote = "combat " + autoCombatIdBefore
-                        + " ended before this machine reached its accept step" + left
-                        + "; see `promotionAtArming`";
+                        + " ended before this machine reached its accept step" + left;
                     return;
                 }
 

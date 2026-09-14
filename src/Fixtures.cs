@@ -110,7 +110,6 @@ namespace TerraInvictaMCP
                     + "silently clamped; asked for "
                     + value.ToString(CultureInfo.InvariantCulture));
 
-            JObject before = StatSnapshot(nation);
             float was = stat.read(nation);
             float delta = value - was;
             stat.add(nation, delta);
@@ -129,16 +128,11 @@ namespace TerraInvictaMCP
                 delegate { return Num(stat.read(nation)); }, JValue.CreateNull());
             o["range"] = Range(stat);
             o["stats"] = after;
-            // Nothing else should have moved: the range check above keeps both
-            // spill paths shut. Reported so a caller sees that rather than
-            // trusting it.
-            o["alsoChanged"] = Moved(before, after, stat.name);
             return o;
         }
 
-        // Every core stat this verb or the console can move, so one call shows
-        // whether anything besides the named stat shifted. unrest rides along
-        // because it is the other side of both spill paths.
+        // Every core stat this verb or the console can move, read back after the
+        // write. unrest rides along because it is the other side of both spill paths.
         static JObject StatSnapshot(TINationState nation)
         {
             var o = new JObject();
@@ -150,24 +144,6 @@ namespace TerraInvictaMCP
             }
             Put(o, "unrest", delegate { return Num(nation.unrest); });
             return o;
-        }
-
-        static JArray Moved(JObject before, JObject after, string skip)
-        {
-            var a = new JArray();
-            foreach (KeyValuePair<string, JToken> kv in before)
-            {
-                if (string.Equals(kv.Key, skip, StringComparison.Ordinal)) continue;
-                JToken then = kv.Value;
-                JToken now = after[kv.Key];
-                if (JToken.DeepEquals(then, now)) continue;
-                var row = new JObject();
-                row["stat"] = kv.Key;
-                row["before"] = then;
-                row["after"] = now != null ? now : JValue.CreateNull();
-                a.Add(row);
-            }
-            return a;
         }
 
         static NationStat FindStat(string name)

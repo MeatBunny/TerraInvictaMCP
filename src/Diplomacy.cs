@@ -336,31 +336,12 @@ namespace TerraInvictaMCP
             o["before"] = before;
             JObject after = ResourceSnapshot(cost, faction);
             o["after"] = after;
-            var spent = new JObject();
-            foreach (KeyValuePair<string, JToken> kv in before)
-            {
-                // Num answers a string for NaN and the infinities and Put answers null
-                // for a read that threw, so only two real numbers get subtracted; the
-                // rest report null rather than a difference invented from a cast.
-                JToken now = after[kv.Key];
-                spent[kv.Key] = IsNumber(kv.Value) && IsNumber(now)
-                    ? Num((float)kv.Value - (float)now)
-                    : JValue.CreateNull();
-            }
-            o["spent"] = spent;
-            o["label"] = RelationshipCostLabel;
             return o;
         }
 
         #endregion
 
         #region cost
-
-        static bool IsNumber(JToken t)
-        {
-            return t != null
-                && (t.Type == JTokenType.Integer || t.Type == JTokenType.Float);
-        }
 
         static TIResourcesCost RelationshipChangeCost()
         {
@@ -907,42 +888,17 @@ namespace TerraInvictaMCP
             // through GainFactionHate, which stores dict[other] + (value - old)
             // rather than assigning the value, so an ordinary write comes back a
             // few ten-millionths off: 0.1 asked of a table holding 47.3 reads
-            // 0.09999847. An exact test calls that write unapplied and the note
-            // below then blames a clamp that never fired. A thousandth is far
-            // below anything the engine's own clamps move.
+            // 0.09999847. An exact test would report an ordinary write as unapplied.
+            // A thousandth is far below anything the engine's own clamps move.
             const float appliedTolerance = 1e-3f;
             bool landed = Math.Abs(applied - value) <= appliedTolerance;
             o["applied"] = landed;
 
-            var notes = new List<string>();
-            if (!landed)
-            {
-                string why = "GainFactionHate clamps the result to this pair's "
-                    + "MinimumFactionHate..MaximumFactionHate";
-                if (alien && delta > 0f)
-                    why += ", and an alien faction's increase is scaled by 0.6 "
-                        + "before that unless the aliens have gone loud";
-                notes.Add("the value read back is " + Fmt(applied) + " against the "
-                    + Fmt(value) + " asked for: " + why);
-            }
+            // An alien subject also pushes the target's assessed alien hate, which is
+            // the number the target's own screens show.
             if (alien)
-            {
-                notes.Add("the subject is the alien faction, so the change also "
-                    + "moved the target's assessed alien hate, which is the number "
-                    + "the target's own screens show");
                 Put(o, "assessedAlienHate", delegate
                 { return Num(target.GetEstimatedAlienHate()); });
-            }
-            // The cascade runs only on an increase: GainFactionHate returns at
-            // IL_0111 for a delta of zero or less, before it reaches any of the
-            // proxy and appeaser arms.
-            if (!cantConflagrate && delta > 0f)
-                notes.Add("cant_conflagrate was not set and this was an increase, "
-                    + "so the engine also spread the change to the alien proxy and "
-                    + "the alien appeaser under their own rules; pass "
-                    + "cant_conflagrate=true to keep the write to this one pair");
-            if (notes.Count > 0)
-                o["note"] = string.Join("; ", notes.ToArray());
             return o;
         }
 
@@ -950,11 +906,6 @@ namespace TerraInvictaMCP
         // forced. SetFactionHate's own default is "Hard Set", which says nothing
         // about who did it.
         const string HateSetCause = "Bridge Set";
-
-        static string Fmt(float f)
-        {
-            return f.ToString("0.##", CultureInfo.InvariantCulture);
-        }
 
         #endregion
     }

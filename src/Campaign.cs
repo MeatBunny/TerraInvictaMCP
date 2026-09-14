@@ -421,10 +421,8 @@ namespace TerraInvictaMCP
             if (t == null || t.Type == JTokenType.Null) return names;
             var array = t as JArray;
             if (array == null)
-            {
-                names.Add(OptionName(t, 0));
-                return names;
-            }
+                throw new VerbError("arg 'options' must be a list of start option "
+                    + "dataNames");
             for (int i = 0; i < array.Count; i++) names.Add(OptionName(array[i], i));
             return names;
         }
@@ -1394,12 +1392,11 @@ namespace TerraInvictaMCP
             }, -1);
             if (choice.option >= 0 && choice.option < options) return choice;
 
-            // The strategy threw or answered outside the offered range. The defined
-            // fallback is the first option the engine itself would accept, which is the
-            // same ValidOption test the strategy filters on.
-            choice.option = FirstValidOption(template, faction, target, secondary, options);
-            choice.pickedBy = "first valid option";
-            return choice.option >= 0 ? choice : null;
+            // The strategy threw or answered outside the offered range. Alerts falls
+            // back to the first clickable button, whose interactability the engine
+            // derives from the same ValidOption test the strategy filters on, index 0
+            // excepted: the popup always offers it.
+            return null;
         }
 
         // The event's target map, off the controller's own record. optionButtonDetail
@@ -1456,24 +1453,6 @@ namespace TerraInvictaMCP
             }, JValue.CreateNull());
             entry["target"] = Safe<JToken>(
                 delegate { return State(target); }, JValue.CreateNull());
-        }
-
-        // The same filter the strategy applies before it weighs anything, over the same
-        // range it walks.
-        static int FirstValidOption(TINarrativeEventTemplate template,
-            TIFactionState faction, TIGameState target, TIGameState secondary, int options)
-        {
-            List<NarrativeEventOption> list = Safe<List<NarrativeEventOption>>(
-                delegate { return template.eventOptions; }, null);
-            if (list == null) return -1;
-            for (int i = 0; i < list.Count && i < options; i++)
-            {
-                NarrativeEventOption option = list[i];
-                if (Safe<bool>(delegate
-                    { return option.ValidOption(faction, target, secondary); }, false))
-                    return i;
-            }
-            return -1;
         }
 
         static TIFactionState PromptFaction(Prompt prompt)

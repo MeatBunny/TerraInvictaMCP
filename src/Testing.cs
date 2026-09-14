@@ -395,8 +395,8 @@ namespace TerraInvictaMCP
         // The engine keeps later registrations with differing scenarioTags in a private
         // duplicates table and resolves them at campaign start; this is the only view of
         // which candidate is live and which were parked or dropped. The engine records
-        // no per-entry provenance, so each candidate's source is null and the row
-        // carries the mod files that write the data name instead.
+        // no per-entry provenance, so the row carries the mod files that write the data
+        // name instead.
         static JToken QueryTemplateDupes(JObject args)
         {
             if (!TemplatesLoaded()) throw new VerbError("templates are not loaded yet");
@@ -468,7 +468,6 @@ namespace TerraInvictaMCP
         {
             var o = new JObject();
             Put(o, "scenarioTags", delegate { return Strings(template.scenarioTags); });
-            o["source"] = null;
             o["live"] = live;
             return o;
         }

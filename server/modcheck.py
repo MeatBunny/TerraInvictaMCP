@@ -276,7 +276,6 @@ class EnumTable:
         self.fingerprint = None
         self.enums = {}           # enum name -> {member: ordinal or [ordinals]}
         self.classes = {}         # class name -> {field: enum name}
-        self.collisions = {}      # enum name -> declaring types, when >1
         self.type_members = {}    # enum name -> {member: frozenset(ordinals)}
         self.name_values = {}     # member name -> set of ordinals, all enums
         self.type_ordinals = {}   # enum name -> set of ordinals
@@ -416,7 +415,6 @@ class EnumTable:
                       if isinstance(v, dict)}
         self.classes = {k: v for k, v in payload["classes"].items()
                         if isinstance(v, dict)}
-        self.collisions = payload.get("collisions") or {}
         self.errors = [e for e in (payload.get("errors") or [])
                        if isinstance(e, str)]
         self.scope = payload.get("scope") or "all"
@@ -2224,15 +2222,12 @@ def check_conflicts(session, only_mod, scenario, verbose):
                     resp["data"].get("duplicates") or []
                 for row in rows:
                     cands = row.get("candidates") or []
-                    live = [c for c in cands if c.get("live")]
                     dead = [c for c in cands if not c.get("live")]
-                    for c in dead:
+                    for _ in dead:
                         lints.append(_finding(
                             lint="engineDupe", **{"class": row.get("type")},
                             dataName=row.get("dataName"),
-                            detail="registration from %s lost to %s"
-                                   % (c.get("source"),
-                                      live[0].get("source") if live else "?")))
+                            detail="a parked registration lost to the live one"))
             else:
                 dupes_source = "file-level"
                 degraded.append("query.templateDupes failed: %s"

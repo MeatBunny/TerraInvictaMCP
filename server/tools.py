@@ -720,10 +720,7 @@ TOOLS = [
      "refusal names the way in (spawn into an orbit, then raw "
      "cmd=fleet.land). Without design: the faction design with the most weapon "
      "mounts. The ships always form their own fleet: spawning where the "
-     "faction already has one puts a second fleet beside it. shipsTotal is "
-     "the new fleet's ship count and equals the ships asked for; a "
-     "merged:true beside it is the canary for that stopping being true, "
-     "and nothing on the current game build makes it appear. Needs a "
+     "faction already has one puts a second fleet beside it. Needs a "
      "loaded campaign.",
      {"faction": i("owning faction id", req=True),
       "ships": i("ship count, 1-20", req=True),
