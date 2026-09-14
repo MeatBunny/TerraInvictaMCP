@@ -31,6 +31,17 @@ All notable changes to TerraInvictaMCP. Format follows
 - Scripts: the consent policy stated once, one server handshake instead of
   two, one snippet printer, the release.sh sweeps for files its staging cannot
   admit, the `zip` Python fallbacks.
+- DLL duplication: one limit clamp, one string-list parser, one sort-then-page,
+  one assembly sweep, one closest-by-name helper, one generic state-argument
+  resolver, one enum parser, one stance-screen gate, one registry lookup, and
+  Harmony called directly instead of through reflection.
+- Reply fields that carried no information: `spawn.fleet` `shipsTotal` and
+  `merged`; `combat.start` `gateFailed` and `warning`; the promotion gate's
+  `willPromote`, `blockedBy`, `note` and `factions`; `combat.autoresolve`
+  `promotionAtArming`; `mission.evaluate` modifier totals, `maxModifiers` and
+  `maxRolls`; `faction.diplomacy` cost `spent` and `label`; `faction.relations`
+  `note`; `nation.set_stat` `reason` and `alsoChanged`; `query.templateDupes`
+  always-null `source`; `action.list` primitive type aliases.
 
 ### Fixed
 
@@ -47,6 +58,17 @@ All notable changes to TerraInvictaMCP. Format follows
 - DLL refusal and warning wording shortened (the `combat.autoresolve` re-arm
   refusal, the `fleet.land` and `fleet.transfer` throw text, the
   `kill.module` warnings); no change to which condition refuses.
+- `harmony.patches` no longer has a no-Harmony fallback shape; `harmony` is
+  always the linked 0Harmony version.
+- `query.state` expands `char` members like the other primitives.
+- `faction.diplomacy` resolves `target` before the executive-faction gate.
+- `combat.stance` and `combat.autoresolve` accept exactly Pursue, Defend and
+  Evade; numeric strings and other enum members are refused.
+- `ai.control` with an explicit empty `action` or `smart` is refused instead
+  of defaulted.
+- Nation and region argument refusals name the state type and list ambiguous
+  matches as `id=dataName`.
+- `campaign.new` refuses a bare-string `options`.
 
 ## [0.1.2] - 2026-09-13
 
