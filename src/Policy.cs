@@ -389,24 +389,33 @@ namespace TerraInvictaMCP
 
         // A response prompt raised by THIS nation. Every PromptPolicyResponse, the base
         // one and all three overrides, passes the enacting nation as promptingGameState,
-        // so that plus the name identifies the proposal; the acting state is the
-        // responding polity and each override derives it differently (the target, the
-        // target's nation, the enemy war leader), which is per-option logic this does not
-        // repeat. Matching the name alone -- which is all HasAnyPromptofType offers --
-        // would be answered by any other nation's proposal of the same type anywhere on
-        // the map.
-        static bool HasPolicyPrompt(string promptName, TINationState nation)
+        // so that plus the name identifies the proposal. Matching the name alone --
+        // which is all HasAnyPromptofType offers -- would be answered by any other
+        // nation's proposal of the same type anywhere on the map.
+        //
+        // `target` narrows the match to one proposal. nation.set_policy passes null,
+        // because its options raise prompts at three different acting states (the
+        // target, the target's nation, the enemy war leader) and it does not repeat
+        // that per-option logic. faction.diplomacy passes the target: both of its async
+        // options take the base PromptPolicyResponse, which passes
+        // `policyTarget as TIPolityState` as actingState, so the triple (name,
+        // promptingGameState, actingState) identifies one proposal. Without the
+        // actingState term, the USA proposing to Canada and then to Mexico reads the
+        // Mexico call as already-queued.
+        static bool HasPolicyPrompt(string promptName, TINationState nation,
+            TIGameState target = null)
         {
             if (string.IsNullOrEmpty(promptName) || nation == null) return false;
             TIPromptQueueState queue = Safe<TIPromptQueueState>(
                 delegate { return GameStateManager.PromptQueue(); }, null);
             if (queue == null) return false;
-            return PromptRaisedBy(promptFactionListField, queue, promptName, nation)
-                || PromptRaisedBy(promptNationListField, queue, promptName, nation);
+            return PromptRaisedBy(promptFactionListField, queue, promptName, nation, target)
+                || PromptRaisedBy(promptNationListField, queue, promptName, nation, target);
         }
 
         static bool PromptRaisedBy(FieldInfo field, TIPromptQueueState queue,
-                                   string promptName, TINationState nation)
+                                   string promptName, TINationState nation,
+                                   TIGameState target)
         {
             if (field == null) return false;
             List<Prompt> list = Safe<List<Prompt>>(
@@ -419,7 +428,11 @@ namespace TerraInvictaMCP
                         promptName, StringComparison.Ordinal)) continue;
                 TIGameState raiser = Safe<TIGameState>(
                     delegate { return prompt.promptingGameState; }, null);
-                if (ReferenceEquals(raiser, nation)) return true;
+                if (!ReferenceEquals(raiser, nation)) continue;
+                if (target == null) return true;
+                TIGameState acting = Safe<TIGameState>(
+                    delegate { return prompt.actingState; }, null);
+                if (ReferenceEquals(acting, target)) return true;
             }
             return false;
         }

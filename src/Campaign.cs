@@ -1874,13 +1874,13 @@ namespace TerraInvictaMCP
                 { return Num(option.outcomeChance(idx, faction, target, secondary)); });
             Put(o, "weight", delegate { return Num(outcome.weight); });
             o["aiFavored"] = Safe<bool>(delegate { return outcome.AIFavored; }, false);
-            o["effects"] = Names(Safe<List<string>>(
+            o["effects"] = ToArray(Safe<List<string>>(
                 delegate { return outcome.effectTemplateNames; }, null));
-            o["delayedEffects"] = Names(Safe<List<string>>(
+            o["delayedEffects"] = ToArray(Safe<List<string>>(
                 delegate { return outcome.delayedEffectTemplateNames; }, null));
-            o["addsEvents"] = Names(Safe<List<string>>(
+            o["addsEvents"] = ToArray(Safe<List<string>>(
                 delegate { return outcome.addNarrativeEvents; }, null));
-            o["removesEvents"] = Names(Safe<List<string>>(
+            o["removesEvents"] = ToArray(Safe<List<string>>(
                 delegate { return outcome.removeNarrativeEvents; }, null));
             Put(o, "projectGranted", delegate
             {
@@ -1913,30 +1913,11 @@ namespace TerraInvictaMCP
             }, JValue.CreateNull());
         }
 
-        static JArray Names(List<string> names)
-        {
-            var a = new JArray();
-            for (int i = 0; names != null && i < names.Count; i++)
-                if (!string.IsNullOrEmpty(names[i])) a.Add(new JValue(names[i]));
-            return a;
-        }
-
-        static string ButtonLabel(UnityEngine.UI.Button button)
-        {
-            try
-            {
-                var label = button.GetComponentInChildren<TMPro.TMP_Text>(false);
-                return label != null ? label.text : null;
-            }
-            catch (Exception) { return null; }
-        }
-
         // The label of an alert-box option button, a hidden one included.
-        // ButtonLabel searches active children only, so it answers null for a
-        // button the engine has SetActive(false) -- and a row for an option the
-        // popup is not drawing is exactly what detail=true exists to report.
-        // Searching inactive children too means the label is present whenever
-        // the button object is, and null only past the end of the array.
+        // The search includes inactive children, so a button the engine has
+        // SetActive(false) still reports its label -- and a row for an option
+        // the popup is not drawing is exactly what detail=true exists to
+        // report. The label is null only past the end of the array.
         static JToken OptionLabel(UnityEngine.UI.Button button)
         {
             if (button == null) return JValue.CreateNull();

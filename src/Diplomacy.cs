@@ -116,7 +116,10 @@ namespace TerraInvictaMCP
             if (relation && cost == null)
                 return "TINationState.FactionLevelRelationShipChangeCost did not resolve";
             if (relation && !Safe<bool>(delegate { return cost.CanAfford(faction); }, false))
-                return StateName(faction) + " cannot pay " + CostText(cost);
+                return StateName(faction) + " cannot pay " + CostText(cost)
+                    + ", which HandleFactionLevelRelationshipChanges charges before "
+                    + "enacting any of the four relationship options; it holds "
+                    + HoldingsText(cost, faction);
             return null;
         }
 
@@ -150,61 +153,20 @@ namespace TerraInvictaMCP
             // the audit string names the drift either way.
             bool requiresConfirm = !relation;
 
-            // Gate 2: the executive faction. Every path the engine takes to the four
-            // relation options charges that faction and hands it on:
-            // HandleFactionLevelRelationshipChanges returns without acting when it is
-            // null, HandlePromptArmyOrderedToDepartDecision pays from it before starting
-            // a ProposeAllianceOption confirm, and each OnPassage body hands it to
-            // InitiateAlliance / EndAlliance / InitiateRivalry / EndRivalry. The nuclear
-            // option is not gated on it: when executiveFaction is null the AI planner
-            // calls OnConfirm directly, so refusing there would be stricter than the
-            // engine.
             TIFactionState faction = ExecutiveFaction(nation);
-            if (relation && faction == null)
-                throw new VerbError(PolicyName(policy) + " needs an executive faction in "
-                    + StateName(nation) + " (" + (int)nation.ID + "), which holds none ("
-                    + ControlPointCount(nation) + " control points): every path the "
-                    + "engine takes to the four relationship options charges that "
-                    + "faction and hands it to the relationship call, and "
-                    + "HandleFactionLevelRelationshipChanges returns without acting at "
-                    + "all when it is null");
 
             // Gate 4: the option's own eligible list, which is the Can* check.
             IList<TIGameState> possible = PossibleTargets(policy, nation);
             TIGameState target = DiplomacyTarget(args, policy, nation, possible);
 
-            // Gate 5: the option's own Allowed(). For the four relation options this is
-            // the target count and the gate above already covers it, but
-            // EmployNuclearWeaponsOption.Allowed carries an independent numNuclearWeapons
-            // > 0 clause that NuclearWeaponsTargets does not: a nation at war with no
-            // warheads left still offers targets, and firing anyway would decrement a
-            // stockpile ChangeNumNuclearWeapons clamps at zero while the strike still
-            // lands as permanent campaign state. Checked generically so any future
-            // option whose Allowed carries clauses beyond target count is covered too.
-            JToken allowed = Safe<JToken>(
-                delegate { return (JToken)policy.Allowed(nation); }, null);
-            if (allowed == null)
-                throw new VerbError(PolicyName(policy) + ".Allowed(" + StateName(nation)
-                    + ") threw, so this call cannot establish that the option is legal");
-            if (!(bool)allowed)
-                throw new VerbError(PolicyName(policy) + ".Allowed() is false for "
-                    + StateName(nation) + " (" + (int)nation.ID + ") even though "
-                    + StateName(target) + " is in its target list, so the option carries "
-                    + "a condition beyond having a target: " + AllowedConditions(policy,
-                        nation, possible));
-
-            // Gate 6: the cost the UI pays before enacting, paid the same way here.
+            // Gates 2, 5 and 6 -- executive faction, the option's own Allowed(), and the
+            // cost the UI pays before enacting -- are exactly what the discovery mode
+            // reports as blockedBy, so they are the same call. A row with no blocker and
+            // an enact call that refuses would be a bug rather than a difference of
+            // opinion.
             TIResourcesCost cost = relation ? RelationshipChangeCost() : null;
-            if (relation && cost == null)
-                throw new VerbError("TINationState.FactionLevelRelationShipChangeCost did "
-                    + "not resolve, so the cost the engine charges for a relationship "
-                    + "change cannot be paid; refusing rather than enacting for free");
-            if (relation && !Safe<bool>(delegate { return cost.CanAfford(faction); }, false))
-                throw new VerbError(StateName(faction) + " (" + (int)faction.ID
-                    + ") cannot pay " + CostText(cost) + ", which "
-                    + "HandleFactionLevelRelationshipChanges charges before enacting any "
-                    + "of the four relationship options; it holds "
-                    + HoldingsText(cost, faction));
+            string blocked = DiplomacyBlocker(policy, nation, faction, cost, possible);
+            if (blocked != null) throw new VerbError(blocked);
 
             // Gate 7: explicit confirmation, for the option that cannot be undone.
             bool confirm = Bool(args, "confirm", false);
@@ -238,7 +200,7 @@ namespace TerraInvictaMCP
             // carries no call identity. Snapshotting it here is what makes
             // awaitingResponse attributable to this call rather than merely true.
             bool promptBefore = promptName != null && probe == null
-                && HasPolicyPromptFor(promptName, nation, target);
+                && HasPolicyPrompt(promptName, nation, target);
             object newsBefore = NewestNotification();
 
             bool paid = false;
@@ -277,7 +239,7 @@ namespace TerraInvictaMCP
             back["promptProbe"] = probe != null
                 ? (JToken)new JValue(probe) : JValue.CreateNull();
             bool unknownPrompt = promptName == null || probe != null;
-            bool waiting = !unknownPrompt && HasPolicyPromptFor(promptName, nation, target);
+            bool waiting = !unknownPrompt && HasPolicyPrompt(promptName, nation, target);
             back["awaitingResponse"] = promptName == null
                 ? (JToken)new JValue(false)
                 : (probe != null ? JValue.CreateNull() : (JToken)new JValue(waiting));
@@ -306,49 +268,6 @@ namespace TerraInvictaMCP
         #endregion
 
         #region read-back
-
-        // Policy.cs pairs a response prompt with the proposing nation alone, which is
-        // all nation.set_policy can do: its options raise prompts at three different
-        // acting states (the target, the target's nation, the enemy war leader) and it
-        // does not repeat that per-option logic. Both async options here take the base
-        // PromptPolicyResponse, which passes `policyTarget as TIPolityState` as
-        // actingState, so the pair (name, promptingGameState, actingState) identifies
-        // one proposal. Without the actingState term, the USA proposing to Canada and
-        // then to Mexico reads the Mexico call as already-queued.
-        static bool HasPolicyPromptFor(string promptName, TINationState nation,
-            TIGameState target)
-        {
-            if (string.IsNullOrEmpty(promptName) || nation == null || target == null)
-                return false;
-            TIPromptQueueState queue = Safe<TIPromptQueueState>(
-                delegate { return GameStateManager.PromptQueue(); }, null);
-            if (queue == null) return false;
-            return PromptRaisedFor(promptFactionListField, queue, promptName, nation, target)
-                || PromptRaisedFor(promptNationListField, queue, promptName, nation, target);
-        }
-
-        static bool PromptRaisedFor(System.Reflection.FieldInfo field,
-            TIPromptQueueState queue, string promptName, TINationState nation,
-            TIGameState target)
-        {
-            if (field == null) return false;
-            List<Prompt> list = Safe<List<Prompt>>(
-                delegate { return field.GetValue(queue) as List<Prompt>; }, null);
-            if (list == null) return false;
-            for (int i = 0; i < list.Count; i++)
-            {
-                Prompt prompt = list[i];
-                if (!string.Equals(Safe<string>(delegate { return prompt.name; }, null),
-                        promptName, StringComparison.Ordinal)) continue;
-                TIGameState raiser = Safe<TIGameState>(
-                    delegate { return prompt.promptingGameState; }, null);
-                if (!ReferenceEquals(raiser, nation)) continue;
-                TIGameState acting = Safe<TIGameState>(
-                    delegate { return prompt.actingState; }, null);
-                if (ReferenceEquals(acting, target)) return true;
-            }
-            return false;
-        }
 
         // Allies and rivals as they stand now against the snapshot. The engine's own
         // record (LogPolicyAdopted) says a policy passed, not that it took effect:
@@ -783,15 +702,6 @@ namespace TerraInvictaMCP
                 + " seconds of game time ahead. Nothing in the engine cancels that "
                 + "event. The strike also stands permanently in the campaign's "
                 + "environmental record. Pass confirm:true to launch";
-        }
-
-        static int ControlPointCount(TINationState nation)
-        {
-            return Safe<int>(delegate
-            {
-                List<TIControlPoint> points = nation.controlPoints;
-                return points != null ? points.Count : 0;
-            }, 0);
         }
 
         #endregion

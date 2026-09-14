@@ -71,8 +71,8 @@ namespace TerraInvictaMCP
         // asserts on and pays for it in a visible stall.
         const int MaxMissionRolls = 1000;
 
-        // Mission data names quoted in a resolution failure.
-        const int MaxMissionNamesListed = 20;
+        // Candidate names quoted in a resolution failure, here and in action.invoke.
+        const int MaxNamesListed = 20;
 
         // Modifiers listed per side. The engine's own lists run to a handful,
         // so this is a ceiling rather than a live cut -- but a list sold as the
@@ -480,22 +480,34 @@ namespace TerraInvictaMCP
 
         static string NearMissionNames(string wanted)
         {
-            if (string.IsNullOrEmpty(wanted)) return "";
-            var near = new List<string>();
-            int total = 0;
+            var names = new List<string>();
             try
             {
                 foreach (TIMissionTemplate t in
                     TemplateManager.IterateByClass<TIMissionTemplate>(true))
-                {
-                    if (t == null || t.dataName == null) continue;
-                    if (t.dataName.IndexOf(wanted, StringComparison.OrdinalIgnoreCase) < 0)
-                        continue;
-                    total++;
-                    if (near.Count < MaxMissionNamesListed) near.Add(t.dataName);
-                }
+                    if (t != null && t.dataName != null) names.Add(t.dataName);
             }
             catch (Exception) { return ""; }
+            return Near(names, wanted);
+        }
+
+        // The "closest by name" tail a not-found refusal carries: a case-insensitive
+        // substring pass over the candidate names, capped, with an ellipsis when more
+        // matched than are listed. Shared with action.invoke's class resolution, whose
+        // candidates come from the action catalog instead.
+        static string Near(List<string> names, string wanted)
+        {
+            if (string.IsNullOrEmpty(wanted) || names == null) return "";
+            var near = new List<string>();
+            int total = 0;
+            for (int i = 0; i < names.Count; i++)
+            {
+                if (names[i] == null) continue;
+                if (names[i].IndexOf(wanted, StringComparison.OrdinalIgnoreCase) < 0)
+                    continue;
+                total++;
+                if (near.Count < MaxNamesListed) near.Add(names[i]);
+            }
             if (near.Count == 0) return "";
             return "; closest by name: " + string.Join(", ", near.ToArray())
                 + (total > near.Count ? ", ..." : "");

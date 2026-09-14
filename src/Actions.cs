@@ -48,9 +48,6 @@ namespace TerraInvictaMCP
         // Constructor candidates quoted in a refusal.
         const int MaxCtorsListed = 8;
 
-        // Class names quoted in a resolution failure.
-        const int MaxActionNamesListed = 20;
-
         // Effects are never claimed. A generic invoker has no idea what success looks
         // like for 99 different actions, so it reports what it submitted and stops.
         const string InvokeNote = "submitted, not verified: this verb reports the call it "
@@ -511,7 +508,11 @@ namespace TerraInvictaMCP
             // else can reach this point. Re-asserted anyway: a generic invoker that ever
             // constructs an arbitrary engine type is the one failure this verb must not
             // have, and a catalog bug would be the only way in.
-            RequireActionType(entry.type);
+            if (entry.type == null || !IsActionClass(entry.type))
+                throw new VerbError("refusing to construct "
+                    + (entry.type != null ? entry.type.FullName : "null")
+                    + ": action.invoke builds only concrete " + ActionsNamespace
+                    + " classes deriving from PlayerAction or SimulationAction");
 
             object action;
             try { action = chosen.info.Invoke(values); }
@@ -529,20 +530,6 @@ namespace TerraInvictaMCP
             o["submitted"] = true;
             o["note"] = InvokeNote;
             return o;
-        }
-
-        static void RequireActionType(Type t)
-        {
-            bool ok = t != null && t.IsClass && !t.IsAbstract && !t.IsNested
-                && string.Equals(t.Namespace, ActionsNamespace, StringComparison.Ordinal)
-                && t != typeof(PlayerAction) && t != typeof(SimulationAction)
-                && (typeof(PlayerAction).IsAssignableFrom(t)
-                    || typeof(SimulationAction).IsAssignableFrom(t));
-            if (ok) return;
-            throw new VerbError("refusing to construct "
-                + (t != null ? t.FullName : "null") + ": action.invoke builds only "
-                + "concrete " + ActionsNamespace + " classes deriving from PlayerAction "
-                + "or SimulationAction");
         }
 
         // Both submission methods are a single virtual Execute() call, so the action runs
@@ -642,30 +629,14 @@ namespace TerraInvictaMCP
                     + " action classes: " + string.Join(", ", listed.ToArray())
                     + "; pass the full name");
             }
+            var names = new List<string>();
+            for (int i = 0; i < all.Count; i++) names.Add(all[i].name);
             throw new VerbError("no action class named '" + wanted + "'"
-                + NearActionNames(wanted) + "; action.list enumerates them (only "
+                + Near(names, wanted) + "; action.list enumerates them (only "
                 + ActionsNamespace + " classes exist here -- a policy option is not an "
                 + "action and no option name resolves, though ConfirmPolicyAction takes "
                 + "one as a parameter and will enact it with no gates at all; "
                 + "faction.diplomacy is the gated path to the five faction-level ones)");
-        }
-
-        static string NearActionNames(string wanted)
-        {
-            if (string.IsNullOrEmpty(wanted)) return "";
-            List<ActionClass> all = Catalog();
-            var near = new List<string>();
-            int total = 0;
-            for (int i = 0; i < all.Count; i++)
-            {
-                if (all[i].name.IndexOf(wanted, StringComparison.OrdinalIgnoreCase) < 0)
-                    continue;
-                total++;
-                if (near.Count < MaxActionNamesListed) near.Add(all[i].name);
-            }
-            if (near.Count == 0) return "";
-            return "; closest by name: " + string.Join(", ", near.ToArray())
-                + (total > near.Count ? ", ..." : "");
         }
 
         #endregion
@@ -902,10 +873,6 @@ namespace TerraInvictaMCP
             string name = ((string)raw).Trim();
             if (name.Length == 0)
                 throw new VerbError("argument '" + p.info.Name + "' is an empty dataName");
-            if (templateFind == null)
-                throw new VerbError("TemplateManager.Find<T>(string, bool) did not "
-                    + "resolve, so template arguments cannot be looked up");
-
             // Find<T> is constrained to TIDataTemplate, so an interface parameter
             // (IOperation) cannot bind it. Those go through the base class and are
             // checked against the declared interface afterwards; a class parameter binds
@@ -920,7 +887,7 @@ namespace TerraInvictaMCP
                     + "cannot be bound to " + TypeLabel(bound) + " (" + Note(e) + ")");
             }
             object found;
-            try { found = find.Invoke(null, new object[] { name, true }); }
+            try { found = find.Invoke(null, new object[] { name }); }
             catch (TargetInvocationException e)
             {
                 Exception inner = e.InnerException != null ? e.InnerException : e;
@@ -1122,36 +1089,17 @@ namespace TerraInvictaMCP
             return Value(value);
         }
 
-        static readonly MethodInfo templateFind = TemplateFindMethod();
-
-        // A rename in the engine has to be loud rather than silent: without this method
-        // every template argument is uncoercible, which would read as the templates
-        // having gone missing.
-        static MethodInfo TemplateFindMethod()
+        // Find<T> is constrained to TIDataTemplate, so it cannot be called with a type
+        // known only at runtime. This wrapper is what gets bound to the parameter's type
+        // instead, and the call inside it is direct: a rename in the engine breaks the
+        // build rather than the verb.
+        static object FindTemplate<T>(string name) where T : TIDataTemplate
         {
-            MethodInfo found = null;
-            try
-            {
-                MethodInfo[] all = typeof(TemplateManager).GetMethods(
-                    BindingFlags.Public | BindingFlags.Static);
-                for (int i = 0; i < all.Length; i++)
-                {
-                    if (!string.Equals(all[i].Name, "Find", StringComparison.Ordinal)) continue;
-                    if (!all[i].IsGenericMethodDefinition) continue;
-                    ParameterInfo[] ps = all[i].GetParameters();
-                    if (ps.Length != 2) continue;
-                    if (ps[0].ParameterType != typeof(string)) continue;
-                    if (ps[1].ParameterType != typeof(bool)) continue;
-                    found = all[i];
-                    break;
-                }
-            }
-            catch (Exception) { }
-            if (found == null && Main.Log != null)
-                Main.Log.Log("WARNING: TemplateManager.Find<T>(string, bool) not found; "
-                    + "action.invoke cannot coerce template arguments.");
-            return found;
+            return TemplateManager.Find<T>(name, true);
         }
+
+        static readonly MethodInfo templateFind = typeof(Verbs).GetMethod(nameof(FindTemplate),
+            BindingFlags.NonPublic | BindingFlags.Static);
 
         #endregion
     }
