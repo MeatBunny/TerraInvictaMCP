@@ -56,14 +56,8 @@ namespace TerraInvictaMCP
             Add(t, "time.run_until", true, TimeRunUntil);
             Add(t, "saves.list", false, SavesList);
             Add(t, "saves.save", true, SavesSave);
-            // Loading works from the main menu; it is the hands-off entry point.
             Add(t, "saves.load", false, SavesLoad);
-            // A new campaign is started from the main menu, so there is no campaign yet.
             Add(t, "campaign.new", false, CampaignNew);
-            // The way back. campaign.new is refused while a campaign is loaded, and
-            // without this the only route to the start screen was killing the
-            // process and launching again. Answers with no campaign too, where it
-            // reports that the menu is already up rather than failing.
             Add(t, "game.main_menu", false, GameMainMenu);
             Add(t, "prompts.list", true, PromptsList);
             Add(t, "prompts.dismiss", true, PromptsDismiss);
@@ -72,79 +66,23 @@ namespace TerraInvictaMCP
             Add(t, "combat.start", true, CombatStart);
             Add(t, "combat.status", true, CombatStatus);
             Add(t, "combat.autoresolve", true, CombatAutoresolve);
-            // The precombat screen's own buttons, for a combat the autoresolver cannot
-            // finish. Dropping the prompt does not clear one of those: it is the
-            // precombat canvas that freezes the clock, and only a button takes it down.
             Add(t, "combat.precombat", true, CombatPrecombat);
-            // The player's stance on a fight nobody is autoresolving. combat.autoresolve
-            // submits one on its way past, so this exists for the other case: a fight
-            // meant to be taken by hand, where the stance prompt is what freezes the
-            // clock and no other verb answers it. action.invoke SelectCombatStance
-            // reaches the same action out of band, without the screen, the allowed-stance
-            // check or the read-back.
             Add(t, "combat.stance", true, CombatSetStance);
-            // Orbital bombardment: the one fleet order with no console command and no
-            // reachable UI path for a fleet the player did not build.
             Add(t, "fleet.bombard", true, FleetBombard);
-            // Landing a fleet on a hab site, which is the only way a fleet becomes a
-            // bombardment target. No console command lands one, and the UI path is an
-            // operation ordered from the fleet's own panel, so it is out of reach for
-            // a fleet the player does not own.
             Add(t, "fleet.land", true, FleetLand);
-            // A fleet with a transfer assigned but not yet launched. action.invoke
-            // cannot build one -- AssignOrbitalTransfer's transfer parameter is
-            // invokable nullOnly, so no real IOrbitalTransfer ever reaches it -- and
-            // no console command plans a transfer, which left the state, and every
-            // refusal that reads it, untestable.
             Add(t, "fleet.transfer", true, FleetTransfer);
-            // National policy: no console command sets one, and the UI path runs through
-            // a councilor mission. These take the engine's own AI enactment instead, with
-            // its legality intact.
             Add(t, "nation.policies", true, NationPolicies);
             Add(t, "nation.set_policy", true, NationSetPolicy);
-            // The five HandledAtFactionLevel options, which are exactly what
-            // nation.set_policy refuses. The only other way to them is
-            // action.invoke ConfirmPolicyAction, which is the raw bypass: no cost,
-            // no eligibility, no confirm. This is the contracted path.
             Add(t, "faction.diplomacy", true, FactionDiplomacy);
-            // Faction hate, the last piece of campaign state with no headless
-            // path: no console command sets one, and war, control_points and the
-            // spawn verbs all write around it. Any AI reaction keyed off hate --
-            // a war declaration, a refused trade, the alien response -- had no
-            // way to be set up and so no way to be tested.
             Add(t, "faction.relations", true, FactionRelations);
-            // Nation stats the console cannot reach, forced directly. Unlike the
-            // two policy verbs above this is a fixture: it bypasses every rule
-            // that would normally move the number.
             Add(t, "nation.set_stat", true, NationSetStat);
-            // Hab modules, the one destructible the console's killstate does not
-            // cover: DestroyModule needs the owning faction's Habs screen. Its
-            // override_protection flag is the only way past the engine's refusal
-            // on the alien primary hab's core and wormhole modules, and it exists
-            // because that refusal makes the wormhole-loss branches unreachable
-            // and so untestable; without the flag the refusal stands as it does
-            // in play.
             Add(t, "kill.module", true, KillModule);
-            // The Habitats screen's power toggle, headless: the same
-            // SetPowerStatus call its action makes, gated on the screen's own
-            // preconditions because the engine's coercion is silent.
             Add(t, "module.power", true, ModuleSetPower);
-            // The Habitats screen's own module build, headless: the same
-            // BuildHabModuleAction its confirm popup submits, with the engine's
-            // own upgrade-versus-new-build decision and its cost. This is the
-            // one that pays; spawn.module is the fixture that does not.
             Add(t, "hab.build_module", true, HabBuildModule);
-            // Mod inspection is campaign-free: templates and both mod loaders finish at
-            // boot, long before any campaign exists.
             Add(t, "mods.list", false, ModsList);
             Add(t, "query.template", false, QueryTemplate);
-            // Pure reflection over the loaded assembly, so it answers at the main menu.
             Add(t, "query.enums", false, QueryEnums);
             Add(t, "harmony.patches", false, HarmonyPatches);
-            // Testing verbs. Localization, the scenario picker, the duplicate
-            // tables and the bundle registries are all filled at boot by GlobalInstaller,
-            // so those answer with no campaign loaded; the loaded scenario, designs,
-            // councilors and nations are campaign state.
             Add(t, "query.localize", false, QueryLocalize);
             Add(t, "query.scenarios", false, QueryScenarios);
             Add(t, "query.scenario", true, QueryScenario);
@@ -154,75 +92,25 @@ namespace TerraInvictaMCP
             Add(t, "query.designs", true, QueryDesigns);
             Add(t, "query.councilors", true, QueryCouncilors);
             Add(t, "query.nations", true, QueryNations);
-            // Fixture verbs. All of them write into campaign state through the
-            // game's own construction paths, so all of them need one loaded.
             Add(t, "spawn.hab", true, SpawnHab);
             Add(t, "spawn.module", true, SpawnModule);
             Add(t, "spawn.army", true, SpawnArmy);
             Add(t, "spawn.councilor", true, SpawnCouncilor);
             Add(t, "spawn.alien_site", true, SpawnAlienSite);
-            // Ship designs. The designer is a mouse-driven screen, so before these
-            // the only designs a test could use were the ones the campaign already
-            // held: whether a part combination is buildable at all had no headless
-            // answer. design.create builds the template by hand and runs the ten
-            // ValidTemplate predicates one at a time, because the engine's own
-            // check is a bare bool that names nothing. design.auto runs the
-            // engine's search, which is the same synchronous call the designer's
-            // AUTODESIGN button makes and is bounded by the faction's own parts.
-            // A campaign, because a design belongs to a faction state.
             Add(t, "design.create", true, DesignCreate);
             Add(t, "design.delete", true, DesignDelete);
             Add(t, "design.auto", true, DesignAuto);
-            // True autopilot: hands the player faction to the real faction AI.
             Add(t, "ai.control", true, AiControl_Verb);
-            // The vanilla autopilot MACRO's state. It switches itself off on the first
-            // exception unless started with IgnoreExceptions, and nothing else reports
-            // that, so a run driving it has to read this every poll.
             Add(t, "query.autopilot", true, QueryAutopilot);
-            // Reading the screen without the screen. The capture answers at the
-            // main menu too, which is where a launch is verified; the tooltip
-            // builders read a nation, so they need a campaign.
             Add(t, "ui.screenshot", false, UiScreenshot);
-            // The options screen's own state, and the engine's own toggle for it.
-            // Nothing else reaches that screen headlessly: the escape key only
-            // closes it, no console command opens it, and game.main_menu takes
-            // its canvas down and disables the component, so whether a campaign
-            // came back with a working options screen had no verb behind it. No
-            // campaign required: at the main menu there is no controller to find
-            // and it answers found=false rather than failing.
             Add(t, "ui.options", false, UiOptions);
-            // The two verbs that make a screen-gated surface photographable. Most
-            // of the game's UI sits behind a view or an info screen only a mouse
-            // opens, and for a driving agent the UI is view-only: a panel no verb
-            // reaches cannot be captured and so cannot be tested at all. Both
-            // change UI state and neither touches game state. A campaign, because
-            // CanvasManager builds its screen registry when the campaign UI loads
-            // and holds nothing at the start screen.
             Add(t, "ui.view", true, UiView);
             Add(t, "ui.screen", true, UiScreen);
             Add(t, "ui.tooltip", true, UiTooltip);
-            // The long-form panel text behind a module or a project, from the
-            // engine's own builders. Character-exact, so a mod's own strings can
-            // be asserted where a player would actually read them. A campaign
-            // because two of the three subjects are campaign state, and the
-            // third builder reads the active player.
             Add(t, "ui.describe", true, UiDescribe);
-            // A contested mission's chance and outcome bands, evaluated out of
-            // the mission phase. Nothing else exercises a patch on
-            // TIMissionResolution_Contested without playing to a mission and
-            // waiting for the phase to run it.
             Add(t, "mission.evaluate", true, MissionEvaluate);
-            // The whole player-action catalog, reflectively. The listing is pure
-            // reflection over the loaded assembly, so it answers at the main menu;
-            // invoking one writes campaign state.
             Add(t, "action.list", false, ActionList);
             Add(t, "action.invoke", true, ActionInvoke);
-            // Test fixture. Puts the game into its own crash state on purpose, so a
-            // client's crash detection and recovery can be exercised without waiting
-            // for a real defect. It ends the session: recovery is a process restart
-            // and a save reload. Needs a campaign, both because that is the state
-            // worth crashing and because HandleException dereferences a
-            // GameTimeManager that does not exist at the main menu.
             Add(t, "test.crash_the_game", true, TestCrashTheGame);
             return t;
         }
@@ -1211,25 +1099,8 @@ namespace TerraInvictaMCP
             return new JValue(t.Name);
         }
 
-        // The endpoint's renderer, and only the endpoint's: a list or a dictionary,
-        // whichever the walk landed on.
-        //
-        // Value() above deliberately does NOT call this. A member dump is depth 1 over
-        // every member at once, and dictionaries are not one member's worth of cost the
-        // way a list is. TIFactionState alone declares 46 of them, 36 with both type
-        // arguments Expandable -- 12 public and 24 more under include_private. At the
-        // 200 cap that is thousands of pairs in a single dump, and one field settles it
-        // on its own: cachedTechTooltipStrings is Dictionary<TIGenericTechTemplate,
-        // string> holding prebuilt tooltip text, so 200 of its values approach the
-        // server's whole 160000-character response budget by themselves. Game-state
-        // keys make it worse than a size problem: intel and highestIntel are keyed by
-        // TIGameState, so rendering both costs up to 400 GetDisplayName calls on the
-        // main thread for a dump nobody asked a dictionary question of.
-        //
-        // So a dictionary expands when the caller walks onto it -- `path=objectives` --
-        // and stays a bare type name in a member dump, exactly as a nested list does.
-        // The cost is then one dictionary per call, which the 200 cap bounds by pair
-        // count and MaxDictChars bounds by size.
+        // Endpoint only: a member dump never expands a dictionary (TIFactionState
+        // has 46, some huge).
         static JToken Collection(object v, Type t, JObject report)
         {
             JToken list = ListValue(v, t, report);
@@ -1332,31 +1203,8 @@ namespace TerraInvictaMCP
             return Value(item);
         }
 
-        // A Dictionary<K,V> expands when BOTH declared type arguments pass the same
-        // Expandable test a list's element type passes, and it is cut at the same cap.
-        // Each side goes through Element, so a template key or value collapses to its
-        // data name exactly as it does inside an expanded list. The test is on the
-        // RUNTIME type, so a member declared IDictionary<K,V> expands when what it
-        // actually holds is a Dictionary<K,V>. Anything else stays a bare type name:
-        // a dictionary of arbitrary objects, and any other map type, since
-        // SortedDictionary is not worth widening the test for until the engine uses
-        // one somewhere this verb has to read.
-        //
-        // Two distinct keys can render to the same text: two templates sharing a data
-        // name is the case that actually occurs, and JSON object members are unique, so
-        // one entry would vanish silently. The object shape is therefore used only when
-        // every rendered key is distinct. Otherwise the answer is an array of
-        // {key, value} pairs with each colliding pair flagged, which keeps the
-        // collision visible instead of eating an entry -- the same choice Element makes
-        // when it reports a throwing dataName rather than a null.
-        // The character budget the 200-entry cap cannot supply. That cap bounds the
-        // number of pairs and says nothing about the size of one:
-        // cachedTechTooltipStrings is a PUBLIC Dictionary<TIGenericTechTemplate, string>
-        // of prebuilt tooltip text, so `path=cachedTechTooltipStrings` needs no
-        // include_private and its first 200 values approach the server's whole 160000-
-        // character response budget by themselves. query.template refuses outright over
-        // its own MaxTemplateChars; this one cuts instead, because valueCount and
-        // valueTruncatedBy travel with the answer and say what was left out.
+        // Both type args must be Expandable; duplicate rendered keys switch the
+        // shape to pairs; MaxDictChars bounds size.
         const int MaxDictChars = 64 * 1024;
 
         static JToken DictValue(object v, Type t, JObject report)
@@ -1525,30 +1373,8 @@ namespace TerraInvictaMCP
         static bool clockParkedByDriver;
         internal static bool ClockParkedByDriver { get { return clockParkedByDriver; } }
 
-        // Everything this mod holds ABOUT a campaign, cleared in one place.
-        //
-        // All of it names something that belongs to one campaign: a date to stop
-        // at, a park the driver asked for, an armed autoresolve and the record of
-        // the last one, a count of mission-phase collisions. None of it means
-        // anything against the next campaign, and two pieces are worse than
-        // meaningless: GameStateManager.ClearAllGameStates restarts the state-id
-        // allocator, so the next campaign in this process hands out the same ids
-        // in the same order, and an armed machine or a one-shot record would bind
-        // to whatever inherits the id.
-        //
-        // Not the seat. Its lifecycle is already handled on both transitions:
-        // LatchSeat runs on the first frame a campaign is up, and ForgetSeat sets
-        // seatTeardown, which only the no-campaign branch of the watchdog clears.
-        // A reset that also called ForgetSeat would leave seatTeardown set for the
-        // whole campaign, and LatchSeat refuses while a teardown is pending, so
-        // the seat would never latch and the seat-moved refusal would never fire.
-        //
-        // The watchdog calls this when a campaign goes away, so the in-game
-        // Options > Exit path -- which runs through no verb and no hook -- resets
-        // exactly what a verb-driven exit resets. Every teardown passes that
-        // branch, which is why nothing has to be reset again when the next
-        // campaign comes up. The three verbs call it because they act a frame or
-        // more before the transition the watchdog sees.
+        // Everything held about one campaign; ids repeat across campaigns.
+        // Not the seat: see ForgetSeat.
         internal static void ResetCampaignRunState()
         {
             runUntilTarget = null;
@@ -1642,40 +1468,8 @@ namespace TerraInvictaMCP
         }
 
         // ------------------------------------------------------- clock watchdog
-        //
-        // Game time not advancing while a campaign is loaded is the failure a
-        // driving agent misses: nothing throws, every verb answers, and a whole
-        // test hour passes with the game paused behind a prompt, parked at a
-        // target nobody re-armed, or waiting on fixtures being built one call at
-        // a time. The server cannot measure it, because it only sees the calls
-        // it makes and the stall is exactly the stretch where it is making none.
-        // So the measurement is here, against real time rather than game time.
-        //
-        // Two conditions count. The clock not moving at all, and the clock
-        // crawling -- speed index below 3 with no run_until armed, where the
-        // date changes every frame while an hour of real time buys a day or two
-        // of game time. The second is the first in slow motion and reads the
-        // same from outside.
-        //
-        // Cost per frame is five engine reads -- the campaign check, the time
-        // manager, its date, its speed index and realtimeSinceStartup -- the
-        // six multiplies that pack the date into one long, and two compares.
-        // Nothing walks the campaign, and the one allocation is the date:
-        // manager.currentTime is TITimeState.Time_Now(), which copy-constructs
-        // a TIDateTime on every call. That is one small short-lived object a
-        // frame, alongside the many the engine's own per-frame callers of the
-        // same property already make. The field behind it, currentDateTime,
-        // would cost nothing to read, but it is private, so reading it means
-        // reflection against a name no compiler checks -- and a rename in a
-        // game patch would park the watchdog silently, which is a worse
-        // failure than a Gen0 object.
-        //
-        // Delegates are what this path does keep out: the whole sample is one
-        // try/catch with no lambda in it, because Safe<T> takes a Func and a
-        // lambda that reads a local builds a display class and a delegate
-        // every time it runs. Once a frame for the life of a session is not a
-        // cost this path may carry. The state name and the blocking prompt use
-        // Safe and are computed when something asks.
+        // Watchdog: real-time stall and crawl detection; no allocation per frame,
+        // so no Safe<T> here.
 
         // The sampled game date, packed into one comparable value. currentTime
         // hands back a fresh object, so the comparison has to be by value.
@@ -1694,20 +1488,8 @@ namespace TerraInvictaMCP
         static bool clockCrawling;
         static bool hadCampaign;
 
-        // A name for the campaign currently loaded, null when there is none.
-        //
-        // Nothing in the engine can supply one. GameStateManager.ClearAllGameStates
-        // restarts the id allocator, so a second campaign of the same scenario in
-        // one process hands out the same state ids in the same order and every id
-        // a client could key on repeats. The date repeats too. So the token is
-        // minted here: a counter bumped on each transition into a campaign, behind
-        // a prefix taken once at mod load, which is what keeps two runs of the same
-        // scenario in two processes from both answering "1".
-        //
-        // A client compares it with the last one it saw. Different means the
-        // campaign it was measuring is gone, whether or not a verb was involved --
-        // the in-game Options > Exit and a campaign started from the start screen
-        // both land here through the watchdog.
+        // Campaign token: counter behind a per-process prefix, since state ids and
+        // dates repeat across campaigns.
         static readonly string campaignTokenPrefix =
             DateTime.UtcNow.Ticks.ToString("x", CultureInfo.InvariantCulture);
         static int campaignCount;
@@ -1798,24 +1580,8 @@ namespace TerraInvictaMCP
         // Called by the verbs that replace or discard the gamestate. The next
         // tick with a campaign present latches whatever faction the new one
         // seated, so a load or a new campaign is never read as a moved seat.
-        //
-        // `seatTeardown` is what makes "the next tick" mean the next tick of the
-        // NEXT campaign. saves.load and game.main_menu start a teardown that runs
-        // as a coroutine: ViewControl.CleanupData yields once before it reaches
-        // ClearAllGameStates and ResetLoadingState, so HasCampaign still answers
-        // true for a frame or more after the verb returns. Main.OnUpdate runs
-        // Server.Drain() and then Verbs.Tick() in the same frame, so the tick that
-        // follows the verb would find a campaign present with nothing latched and
-        // re-latch the OUTGOING campaign's faction, undoing the call that just
-        // cleared it. The flag holds the latch shut until TickClockWatch sees no
-        // campaign, which is the engine reporting the teardown finished, and that
-        // branch is the only place it clears.
-        //
-        // campaign.new needs none of this and is not harmed by it: it refuses
-        // unless HasCampaign is already false, so the first tick after it clears
-        // the flag and the latch is open again well before the new gamestate
-        // exists. It calls this anyway, since nothing latched from an earlier
-        // campaign may survive into the new one.
+        // Teardown is a coroutine, so HasCampaign stays true for a frame; the flag
+        // stops the next tick re-latching the outgoing seat.
         internal static void ForgetSeat()
         {
             seatedFaction = null;
@@ -1867,12 +1633,7 @@ namespace TerraInvictaMCP
         static void TickClockWatch()
         {
             float now = RealTime();
-            // Every engine read of the frame, in one try/catch with no lambda
-            // in it. IsCrawl went through Safe<bool>, so this path used to
-            // build a closure a frame to read one property. A read that throws
-            // leaves `campaign` false and `manager` null, which parks the
-            // watchdog for this frame rather than reporting a stall it did not
-            // measure.
+            // One try/catch, no lambda: this runs every frame.
             bool campaign = false;
             GameTimeManager manager = null;
             TIDateTime cur = null;
@@ -2409,15 +2170,7 @@ namespace TerraInvictaMCP
             return WholeNumber(t, key);
         }
 
-        // The token type is tested before the value is read. JSON.NET's explicit
-        // cast is a conversion rather than a check, and it accepts the string and
-        // boolean token types as numbers: it hands the value to Convert.ToInt32,
-        // which rounds 2.5 to 2, answers 1 for true, and reads the string "12" as
-        // twelve. A slot, an id or a tier invented that way is a wrong call that
-        // reads as a right one, and from the fixture verbs it lands in campaign
-        // state. A caller who means a number sends a number: the tool schemas
-        // declare integer, and a hand-written raw call gets the type it sent named
-        // back to it.
+        // JSON.NET's cast converts strings and bools; require the integer token type.
         static int WholeNumber(JToken t, string key)
         {
             if (t.Type != JTokenType.Integer)
@@ -2463,16 +2216,8 @@ namespace TerraInvictaMCP
         static T Arg<T>(JObject args, string key) where T : TIGameState
         {
             int id = Int(args, key);
-            // The typed lookup first, which is the one ById uses: two dictionary probes
-            // against the type bucket, then a probe per bucket whose key is assignable
-            // to T. The non-generic FindGameState below enumerates every bucket and
-            // compares every id in it one at a time, so it charges the size of the
-            // campaign to every call -- mission.evaluate makes two per request and
-            // ui.describe up to three, on the main thread with the game frozen.
-            //
-            // The scan is kept for the miss, where it is the only way to say WHICH kind
-            // the id resolved to. A miss is already the error path, so the campaign-size
-            // walk is paid only by a call that is about to be refused.
+            // Typed lookup first; the non-generic scan is O(campaign) and runs only
+            // on the miss, to name the wrong type.
             T typed = GameStateManager.FindGameState<T>(new GameStateID(id), true);
             if (typed != null) return typed;
             TIGameState state = GameStateManager.FindGameState(new GameStateID(id));

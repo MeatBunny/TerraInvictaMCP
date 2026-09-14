@@ -856,48 +856,31 @@ namespace TerraInvictaMCP
                 + autoReached.ToString().ToLowerInvariant()
                 + (autoError != null ? " and failed with: " + autoError : "");
 
-            // The way out is named as a thing to CHECK, not as a thing that will
-            // work. Both one-shots run through EndPrecombatInteraction, which
-            // deactivates preCombatUIObject and hides the canvas, so the screen's own
-            // close and cancel buttons may already be gone by the time either of these
-            // fires -- and a message promising they are there would send an unattended
-            // run to a dead end twice.
+            string reason = null;
             if (autoFiredAccept)
-                return what + ". OnAcceptAutoresolveSelected has already "
-                    + "fired on it, and that reaches ApplySimulatedCombat, which writes "
-                    + "damage into the real states -- arming again would apply the same "
-                    + "battle twice. Inspect with combat.status, and with "
-                    + "combat.precombat action=status, which reports whether the canvas "
-                    + "is up and which of its buttons are live; if none are, nothing "
-                    + "here can clear the screen and it needs a person";
-            if (autoFiredSelect)
-                return what + ". AutoresolveSelected has already fired on "
-                    + "it, raising PrecombatComplete, and arming again would raise a "
-                    + "second one. Inspect with combat.status, and with "
-                    + "combat.precombat action=status, which reports whether the canvas "
-                    + "is up and which of its buttons are live; if none are, nothing "
-                    + "here can clear the screen and it needs a person";
-            if (autoErrorKind == AutoFail.Stable)
-                return what + ". Nothing a retry does changes that "
-                    + "condition, so this is not armed again";
-            if (autoErrorKind == AutoFail.DeadEnd)
-                return what + ". The combat is gone and the precombat "
-                    + "canvas is still up holding the clock; no arm reaches it. The "
-                    + "close pass already tried both close buttons every frame of its "
-                    + "budget, so check combat.precombat action=status for a live "
-                    + "button before assuming one is there";
-            // Gated on a recorded error: attempts alone are not failures. A combat
-            // both sides of which turned out to be AI disarms cleanly with a note and
-            // no error, and re-arming on it is harmless.
-            //
-            // The budget is a count rather than a comparison of error texts. Two
-            // failures that alternate between two messages are the same loop as two of
-            // one message, and a same-text test would let the alternating pair run
-            // forever.
-            if (autoAttempts >= MaxAutoresolveAttempts && autoError != null)
-                return what + ", over " + autoAttempts + " attempts. That "
-                    + "is the retry budget, so this is not armed again";
-            return null;
+                reason = "OnAcceptAutoresolveSelected has already fired on it, and that "
+                    + "reaches ApplySimulatedCombat, which writes damage into the real "
+                    + "states: arming again would apply the same battle twice";
+            else if (autoFiredSelect)
+                reason = "AutoresolveSelected has already fired on it, raising "
+                    + "PrecombatComplete, and arming again would raise a second one";
+            else if (autoErrorKind == AutoFail.Stable)
+                reason = "nothing a retry does changes that condition";
+            else if (autoErrorKind == AutoFail.DeadEnd)
+                reason = "the combat is gone and the precombat canvas is still up "
+                    + "holding the clock; no arm reaches it";
+            // Gated on a recorded error: attempts alone are not failures. The budget is a
+            // count, so two failures alternating between two messages still trip it.
+            else if (autoAttempts >= MaxAutoresolveAttempts && autoError != null)
+                reason = "that is the retry budget, over " + autoAttempts + " attempts";
+            if (reason == null) return null;
+
+            // The way out is named as a thing to CHECK, not as a thing that will work:
+            // both one-shots run through EndPrecombatInteraction, which hides the canvas,
+            // so its close and cancel buttons may already be gone.
+            return what + ". " + reason + ". Inspect with combat.status, and with "
+                + "combat.precombat action=status, which reports whether the canvas is up "
+                + "and which of its buttons are live; if none are, it needs a person";
         }
 
         // Records the furthest phase this combat's machine has entered. Called on every
@@ -1094,49 +1077,16 @@ namespace TerraInvictaMCP
                         autoNote = "combat ended before simulation";
                         return;
                     }
-                    // The combat is gone and no canvas is left to close, so no
-                    // button will run. Every path that removes PromptBeginCombat is
-                    // one of those buttons, and neither engine path that ends a
-                    // combat here touches the prompt or the canvas, so a standing
-                    // PromptBeginCombat blocks saving and holds the clock for the
-                    // rest of the campaign with nothing left to clear it.
-                    //
-                    // The two paths, and they are not equally likely:
-                    //
-                    //  - PROMOTION. TISpaceCombatState.StartCombatFromStrategyLayer
-                    //    archives the combat, removes it from the GameStateManager
-                    //    and calls SpaceCombatManager.SetCombat(null) when its own
-                    //    gate refuses the cached assets -- before InitializeCombat
-                    //    runs at all. This is what a fixture-built fight hits, and
-                    //    `promotionAtArming` on the status is that gate as it read
-                    //    when this was armed. See PromotionGate.
-                    //  - AUTORESOLVE. TISpaceCombatState.Autoresolve simulates when
-                    //    fleets[1] OR hab is non-null and otherwise calls its local
-                    //    EndCombat (RecordSurvivors, EndCombatForStrategyGame,
-                    //    SetCombat(null)). Past a successful promotion that needs
-                    //    BOTH to be null, and nothing rewrites fleets[1] after
-                    //    InitializeCombat sets it, so it can only be a hab-only
-                    //    combat whose hab HandlePrecombat nulled at its IL_03df --
-                    //    a defender that evaded. A two-fleet fight cannot reach it.
-                    //
-                    // Disarming quietly here is what left the prompt standing. The
-                    // removal is the engine's own and is bounded by the prompt's
-                    // five fields, so it takes nothing this canvas did not queue.
+                    // Gone with no canvas left to close, so no button will run and a
+                    // standing PromptBeginCombat would hold the clock; see PromotionGate.
                     string left = ClearOrphanBeginCombatPrompt(
                         FindPrecombat(), autoCombatIdBefore)
                         ? " and cleared the PromptBeginCombat it left standing"
                         : "";
                     Disarm();
                     autoNote = "combat " + autoCombatIdBefore
-                        + " ended before this machine reached its accept step, so "
-                        + "neither the accept nor a close ran" + left
-                        + ". Read `promotionAtArming`: the usual cause is that the "
-                        + "engine refused to promote the combat at all "
-                        + "(StartCombatFromStrategyLayer archives and removes one "
-                        + "whose cached assets fail its gate, before InitializeCombat "
-                        + "runs). The other cause is Autoresolve's own end-outright "
-                        + "branch, which needs fleets[1] AND hab both null and so "
-                        + "reaches only a hab-only combat whose defender evaded";
+                        + " ended before this machine reached its accept step" + left
+                        + "; see `promotionAtArming`";
                     return;
                 }
 
@@ -2293,17 +2243,9 @@ namespace TerraInvictaMCP
                 try { fleet.DepartFromDockingLocation(); }
                 catch (Exception e)
                 {
-                    throw new VerbError("TISpaceFleetState.DepartFromDockingLocation "
-                        + "threw for fleet " + (int)fleet.ID + ": " + Note(e)
-                        + ". Nothing was landed. The departure cancels the operations "
-                        + "that do not survive it before anything else, so some or all "
-                        + "of them are gone and this call cannot tell which: the cancel "
-                        + "loop has no per-item guard, so a throw partway through it "
-                        + "leaves the entries after the failure live and the failing one "
-                        + "half-processed, and CurrentOperations itself throws on a null "
-                        + "list before a single one is cancelled. The fleet is otherwise "
-                        + "where it was. 'before' reports the state this verb found; "
-                        + "read the fleet back to see what survived");
+                    throw new VerbError("DepartFromDockingLocation threw for fleet "
+                        + (int)fleet.ID + ": " + Note(e) + "; nothing was landed, some "
+                        + "operations may be cancelled, read the fleet back");
                 }
             }
             o["departedFrom"] = departed;
@@ -2327,85 +2269,27 @@ namespace TerraInvictaMCP
             try { fleet.Land(site); }
             catch (Exception e)
             {
-                // Three states, not two. A membership that could not be READ is not a
-                // membership of false, and it is not one of true either: the repair
-                // below is a write, and writing over state this call could not measure
-                // is how a landing that actually took gets undone. It declines to
-                // write, and says so instead of reporting the read it did not make.
+                // The one repair: pointed at the site but never in its landedFleets is
+                // the state nothing else undoes. A membership that could not be READ is
+                // not a membership of false, so an unreadable list writes nothing.
                 JToken membership = Safe<JToken>(delegate
                 {
                     List<TISpaceFleetState> landed = site.landedFleets;
                     return (JToken)new JValue(landed != null && landed.Contains(fleet));
                 }, JValue.CreateNull());
-                bool listRead = membership.Type == JTokenType.Boolean;
-                bool nowListed = listRead && (bool)membership;
-                bool pointsAtSite = ReferenceEquals(Safe<TISpaceGameState>(
-                    delegate { return fleet.dockedLocation; }, null), site);
-
-                var state = new List<string>();
-                if (!listRead)
+                if (membership.Type == JTokenType.Boolean && !(bool)membership
+                    && ReferenceEquals(Safe<TISpaceGameState>(
+                        delegate { return fleet.dockedLocation; }, null), site))
                 {
-                    state.Add("the site's landedFleets could not be read, so whether the "
-                        + "landing took is unknown and nothing was undone"
-                        + (pointsAtSite
-                            ? "; the fleet points at the site, which is either a landing "
-                              + "that succeeded or the state nothing repairs, and this "
-                              + "call cannot tell them apart"
-                            : "; the fleet does not point at the site"));
+                    try { fleet.dockedLocation = null; }
+                    catch (Exception) { }
                 }
-                else if (nowListed)
-                {
-                    // Past LandFleet. The landing is real as far as the site is
-                    // concerned; what failed is the tail, so nothing is undone.
-                    state.Add("the landing itself took -- the fleet is in the site's "
-                        + "landedFleets"
-                        + (pointsAtSite ? " and points at it"
-                            : " but does NOT point at it, which the load-time sweep "
-                              + "drops on the next load")
-                        + " -- so nothing was undone");
-                }
-                else if (pointsAtSite)
-                {
-                    try
-                    {
-                        fleet.dockedLocation = null;
-                        state.Add("the fleet had been pointed at the site without "
-                            + "reaching its landedFleets, the state nothing repairs, "
-                            + "and was pointed back at nothing");
-                    }
-                    catch (Exception undo)
-                    {
-                        state.Add("the fleet points at the site, is absent from its "
-                            + "landedFleets, and clearing that threw as well ("
-                            + Note(undo) + ")");
-                    }
-                }
-                else
-                {
-                    state.Add("the fleet reached neither the site's landedFleets nor "
-                        + "its dockedLocation, so the descent got no further than its "
-                        + "opening");
-                }
-                if (departed.Type != JTokenType.Null)
-                    state.Add("the departure this verb made first is not undone, so the "
-                        + "fleet has left its old location");
-                // Land's very first call, at IL_0015, ahead of the dockedLocation write
-                // at IL_0021 that every other line here is measured against. So the
-                // cancel pass has been entered on every path that reaches this catch,
-                // and on the branch these lines matter most for it is the thrower
-                // itself: a throw after the store leaves pointsAtSite true.
-                state.Add("the fleet's current operations were force-cancelled first: "
-                    + "Land calls ForceCancelCurrentOperations before it writes "
-                    + "anything, so some or all of them are gone and this call cannot "
-                    + "tell which. The cancel loop has no per-item guard, so a throw "
-                    + "partway leaves the entries after the failure live and the "
-                    + "failing one half-processed, and CurrentOperations throws on a "
-                    + "null list before any of them is cancelled");
-                state.Add("anything the descent wrote before it threw -- delta-V spent, "
-                    + "formation, ship positions -- stands");
                 throw new VerbError("TISpaceFleetState.Land threw for fleet "
                     + (int)fleet.ID + " at " + StateName(site) + " (" + (int)site.ID
-                    + "): " + Note(e) + ". " + string.Join("; ", state.ToArray()));
+                    + "): " + Note(e) + ". Land force-cancels the fleet's current "
+                    + "operations before it writes anything, so some or all of them are "
+                    + "gone. after: " + LandingState(fleet, site)
+                        .ToString(Newtonsoft.Json.Formatting.None));
             }
 
             o["changed"] = true;

@@ -772,58 +772,12 @@ namespace TerraInvictaMCP
             return "kind is one of: " + string.Join(", ", names.ToArray());
         }
 
-        // Two ways a mining template walks the builder into an unhandled
-        // NullReferenceException. Both are refused here instead, and both are
-        // gated on the same `mine` flag, which is why non-mining modules never
-        // see either.
-        //
-        // 1. NO FACTION. Mass_tons ends with
-        //
-        //        IL_006e:  ldfld bool TIHabModuleTemplate::mine
-        //        IL_0074:  brfalse.s IL_0082       // not a mine: skip
-        //        IL_0076:  ldarg.s 4               // faction, NO null test
-        //        IL_0078:  callvirt TIFactionState::GetMineSizeModifier()
-        //
-        //    and the builder calls Mass_tons on both sides of its null-hab
-        //    branch (the hab's own body, or Luna when there is no hab), so a
-        //    null faction throws whatever `hab` is. `hab` was never that
-        //    trigger.
-        //
-        // 2. A HAB WITH NO HAB SITE, which is every orbital station.
-        //    MonthlyResourceIncome guards the faction and the location on all
-        //    five of its GetMiningIncome_Month branches, then passes
-        //    location.ref_habSite straight through -- null for a station -- and
-        //    GetMiningIncome_Day dereferences it:
-        //
-        //        IL_0000:  ldfld bool TIHabModuleTemplate::mine
-        //        IL_0006:  brtrue.s IL_000e        // not a mine: return 0
-        //        IL_001d:  ldarg.2                 // habSite, NO null test
-        //        IL_001f:  callvirt TIHabSiteState::GetDailyProduction(resource)
-        //
-        //    A null hab stays fine: that one the location guard catches, and
-        //    the call returns 0 without reaching this.
-        //
-        // Nothing else on either path can throw. That IL_001f is the only
-        // unguarded ref_habSite dereference in the whole builder tree:
-        // ProspectivePower(TIGameState, TIFactionState) tries habSite, then
-        // orbit, then system, each null-tested; relativeEnergyForMining tests
-        // its faction; MonthlySupportCost, MonthlyCrewSupportCost and
-        // SpaceCombatValue never touch a hab site; and the builder's own two
-        // hab reads, get_inEarthLEO and FarmCrewDiscount, are each behind a
-        // null test on the hab.
-        //
-        // Refused rather than substituted, in both cases. GetMineSizeModifier
-        // is a real per-faction multiplier off that faction's orgs and effects,
-        // and daily production is a real property of a specific site's
-        // resources; a number invented for either would be a mass, a cost and
-        // an income no player ever sees. The game cannot produce the second
-        // pairing on its own -- all three mining templates are habType Base --
-        // but spawn.module bypasses ValidModuleForSlot, so this harness can.
-        //
-        // Both kinds reach it, which is why this takes the kind and the module STATE
-        // when there is one: 'module.benefits' is handed a faction and a hab as
-        // arguments and 'module.summary' has FullSummary read them off the module, so
-        // the same two throws need two different pieces of advice.
+        // Two unguarded dereferences inside the builder, both gated on the template's
+        // `mine` flag: Mass_tons reads GetMineSizeModifier off the faction (IL_0076),
+        // and GetMiningIncome_Day reads the hab site (IL_001d). Refused rather than
+        // substituted: either number invented here would be a mass, a cost and an
+        // income no player ever sees. Takes the kind and the module state because the
+        // two kinds get their faction and hab from different places.
         static void RequireMiningInputs(string kind, TIHabModuleTemplate module,
             TIFactionState faction, TIHabState hab, TIHabModuleState state)
         {

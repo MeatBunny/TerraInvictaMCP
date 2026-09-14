@@ -346,25 +346,10 @@ namespace TerraInvictaMCP
             // reporting path below it is reached.
             bool willDestroy = !blocked || overrideWanted;
 
-            // Refused rather than overridden: the flag exists to reach the
-            // module-loss branches the engine's refusal hides, and destroying the
-            // hab's last okay module reaches something else entirely. DestroyHab
-            // carries an alien-primary-hab guard of its own, an identity test
-            // against the same primaryHab field, and with that field pointed
-            // elsewhere it would read false and let the whole tail run: the
-            // notification queue cleaned of the archived state, the kill
-            // registered, resolving missions rewritten, the faction's fleets
-            // re-homed and the hab archived. The engine stops after logging the
-            // loss for that one hab. The finally below would then restore
-            // primaryHab to a hab that is gone.
-            // `<= 1`, not `== 1`. TIHabState.OkayModules walks activeSectors
-            // only, while this verb's precondition is the module's own `okay`
-            // flag, which carries no sector test. A module that is okay inside an
-            // inactive sector is therefore not in the count, so the hab can read
-            // zero okay modules with a destroyable one in hand -- and after the
-            // destruction the count is still zero, which is exactly the branch
-            // that runs DestroyHab. Both readings reach the hab-destruction path
-            // and both have to be refused here.
+            // `<= 1`, not `== 1`: OkayModules walks activeSectors only, while the
+            // precondition here is the module's own `okay` flag, so a hab can read
+            // zero okay modules with a destroyable one in hand and still reach
+            // DestroyHab.
             if (blocked && overrideWanted && okayBefore <= 1)
                 throw new VerbError("override_protection is refused here: the hab "
                     + "reports " + okayBefore + " okay module(s), so destroying "
@@ -382,27 +367,9 @@ namespace TerraInvictaMCP
                     + "different module; this hab has no other okay one, so give "
                     + "it one with spawn.module first. Nothing was changed");
 
-            // The engine cannot take a hab down for nobody. DestroyModule's
-            // last-module branch calls DestroyHab, and both of DestroyHab's
-            // reporting paths -- the alien-primary-hab one that logs the loss and
-            // returns (IL_038e-IL_03ae) and the ordinary one that archives the hab
-            // (IL_09d3-IL_09eb) -- hand the destroying faction to
-            // TINotificationQueueState.LogHabDestroyed, whose first use of it is
-            // `destroyingFaction.displayNameCapitalized` on a callvirt with no null
-            // test (IL_008c on the alien headline, IL_0153 on the ordinary one).
-            // With no destroyer that is a NullReferenceException thrown AFTER the
-            // module has already been destroyed, which is a half-applied call the
-            // engine's own callers never make: every one of them is a combat, a
-            // bombardment or a mission, and each names a faction.
-            //
-            // Observed: a call with no destroyer on the last okay module of the
-            // alien primary hab left the module destroyed, the hab alive and
-            // unarchived, and returned a bare NRE with no reply body.
-            // `<= 1` for the reason given on the refusal above: OkayModules
-            // counts active sectors only, so an okay module in an inactive
-            // sector leaves the count at zero, and zero reaches the same
-            // DestroyHab branch that one does. `== 1` let that reading through
-            // to the engine with a null destroyer, which is the NRE below.
+            // LogHabDestroyed reads destroyingFaction.displayNameCapitalized with no
+            // null test (IL_008c on the alien headline, IL_0153 on the ordinary one),
+            // after the module is already gone. `<= 1` for the reason given above.
             if (willDestroy && okayBefore <= 1 && destroyer == null)
                 throw new VerbError("hab " + (int)hab.ID + " reports " + okayBefore
                     + " okay module(s), so destroying module " + (int)module.ID
@@ -523,51 +490,34 @@ namespace TerraInvictaMCP
             // end and this one did not.
             if (threw.Type != JTokenType.Null)
                 warnings.Add("DestroyModule THREW: " + threw.ToString()
-                    + ". Whatever it had already done stands -- `destroyed`, "
-                    + "`habDestroyed`, `primaryHab` and the module counts above are "
-                    + "read back from the game after the throw, so they say where "
-                    + "the state landed. This is an engine path the verb's refusals "
-                    + "did not know about; report it");
+                    + ". The fields above are read back after the throw, so they say "
+                    + "where the state landed; report it");
             // Only when the call ran to the end: after a throw, a false here is
             // "the engine never got to say", not the documented refusal.
             if (!destroyed && threw.Type == JTokenType.Null)
-                warnings.Add("the engine refused the destruction and reported "
-                    + "false; the one case that does this is a core module, or one "
-                    + "whose template carries HabModuleSpecialRule.AlienWormhole, "
+                warnings.Add("the engine refused the destruction: a core module, or "
+                    + "one whose template carries HabModuleSpecialRule.AlienWormhole, "
                     + "on the alien faction's primary hab"
                     + (blocked && !overrideWanted
-                        ? ", which is exactly this call. Pass "
-                          + "override_protection=true to destroy it anyway"
+                        ? ", which is this call; pass override_protection=true"
                         : ""));
             if (overrideApplied && destroyed)
-                warnings.Add("override_protection was set, so the alien faction's "
-                    + "primaryHab was pointed elsewhere for the one DestroyModule "
-                    + "call and restored afterwards. The engine protects this "
-                    + "module because NO PLAY PATH destroys it: nothing in "
-                    + "bombardment, combat or a mission picks a core module or an "
-                    + "AlienWormhole on the alien primary hab, so the resulting "
-                    + "campaign state is one the game never produces and anything "
-                    + "downstream of it proves nothing about play");
+                warnings.Add("override_protection swapped primaryHab for one call; "
+                    + "this state is one no play path produces");
             if (core && destroyed)
-                warnings.Add("a core module was destroyed; vanilla bombardment "
-                    + "and combat never pick the core, so this is a hab state no "
+                warnings.Add("a core module was destroyed; this is a hab state no "
                     + "play path produces");
             if (habGone)
                 warnings.Add("that was the hab's last okay module, so the engine "
                     + "destroyed the hab itself");
-            // Only when something was actually destroyed. The hate branch sits inside
-            // the destruction, after the refusal returns false at IL_005d, so a
-            // refused or thrown call applied none of it -- and this warning used to
-            // announce hate the campaign never gained.
+            // Only when something was actually destroyed: the hate branch sits inside
+            // the destruction, after the refusal returns false at IL_005d.
             if (hateOn && destroyed)
-                warnings.Add("hate was switched on, so the hab's owner gained "
-                    + "hate toward the destroyer and both sides may have "
-                    + "committed atrocities; see the hate object for the amount "
-                    + "the engine computed");
+                warnings.Add("hate was switched on and applied; see the hate object "
+                    + "for the amount the engine computed");
             if (hateOn && !destroyed)
                 warnings.Add("hate was requested, but nothing was destroyed, so the "
-                    + "engine never reached its hate branch: no hate was gained and "
-                    + "no atrocity was committed");
+                    + "engine never reached its hate branch");
             if (warnings.Count > 0)
                 o["warning"] = string.Join("; ", warnings.ToArray());
             return o;

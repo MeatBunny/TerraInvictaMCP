@@ -474,12 +474,6 @@ namespace TerraInvictaMCP
                     + (owner != null ? StateName(owner) : "no nation")
                     + ", not " + StateName(nation));
 
-            // Strength is a fraction of full: SetStrength
-            // (IL_0002-IL_0011), TakeDamage (IL_0031-IL_0047) and HealDamage
-            // (IL_0020-IL_0036) each put it through Mathf.Clamp(x, 0, 1). NewArmy
-            // is the one writer that stores its argument raw (IL_008a-IL_008c),
-            // so a larger value stands until the first thing that damages or
-            // heals the army snaps it down to 1 with no warning.
             float strength = Bounded("strength", Float(args, "strength", 1f), 0f, 1f,
                 "army strength is a 0..1 fraction of full, which every engine"
                 + " writer but NewArmy clamps; NewArmy stores it as given, so a"
@@ -663,15 +657,6 @@ namespace TerraInvictaMCP
                 // so triggering on a live landing deploys twice.
                 if (Safe<bool>(delegate { return holder.landingPresent; }, false))
                     throw new VerbError("region already has an alien landing");
-                // The engine's own default for "however long the template says" is a
-                // negative override, so an absent 'days' passes straight through.
-                //
-                // Ten years is the ceiling. TriggerLanding sets landingPresent and
-                // the site's HP (IL_0000-IL_000d) before it so much as reads the
-                // argument (IL_0062), so a duration AddDays refuses leaves a
-                // landing standing in the region that never deploys its army and
-                // that this verb then refuses to re-trigger. The engine's own
-                // duration is daysToFieldArmyFromUFO, 32 days.
                 holder.TriggerLanding(Bounded("days", Float(args, "days", -1f),
                     float.NegativeInfinity, MaxLandingDays,
                     "the landing is marked present and given HP before 'days' is"
@@ -687,23 +672,6 @@ namespace TerraInvictaMCP
             {
                 TIRegionXenoformingState holder = Holder<TIRegionXenoformingState>(
                     delegate { return region.xenoforming; }, "xenoforming");
-                // Passed through unclamped below the ceiling. SetXenoformingLevel writes the value and
-                // then floors it with Mathf.Max(0, level) (IL_000e-IL_001f), so a
-                // negative reads back as 0 and level=0 is the engine's own removal
-                // rather than anything this verb invents. Both the level and Extant
-                // are read back afterwards, because the engine's floor is the only
-                // thing between the argument and the state.
-                //
-                // The ceiling is the engine's own spawnArmyValue, 100 in the
-                // static constructor. DailyXenoformingGrowth spends the level back
-                // down from there: at or above it, the region spawns a megafauna
-                // army and pays megafaunaSpawnCost, -50 (IL_00a6-IL_00cc), so no
-                // engine path holds a level much above 100. A larger one crashes
-                // the campaign: a faction taking intel on the region dates the
-                // reading with AddDays(-level * 12) from the campaign date in
-                // SetIntel (IL_04b5-IL_04d0), which throws past DateTime.MinValue
-                // on the next daily tick, with the level already written and the
-                // throw repeating on every tick after.
                 float ceiling = MaxXenoformingLevel();
                 float level = Bounded("level", RequiredFloat(args, "level"),
                     float.NegativeInfinity, ceiling,
