@@ -1478,22 +1478,8 @@ namespace TerraInvictaMCP
             return QueryTime(args);
         }
 
-        // A refusal, not a failure: answering with the time state plus a named
-        // hold keeps one call enough to learn why the clock is paused.
-        // Unreachable today -- HoldActive is always false since the engagement
-        // stopped holding the clock for mission phases -- but the gate and the
-        // reply shape stay so no caller has to reason about a removed path.
-        static JToken Held()
-        {
-            JToken data = QueryTime(new JObject());
-            var o = data as JObject;
-            if (o != null) o["held"] = AiControl.HoldReason;
-            return data;
-        }
-
         static JToken TimePlay(JObject args)
         {
-            if (AiControl.HoldActive) return Held();
             clockParkedByDriver = false;
             Manager().Play();
             return QueryTime(args);
@@ -1513,9 +1499,6 @@ namespace TerraInvictaMCP
             catch (Exception) { }
             if (count > 0 && level >= count)
                 throw new VerbError("arg 'level' must be < " + count);
-            // After validation: a bad level is a bad level whether or not the
-            // engagement is holding the clock.
-            if (AiControl.HoldActive) return Held();
             clockParkedByDriver = level == 0;
             manager.SetSpeed(level, false);
             return QueryTime(args);

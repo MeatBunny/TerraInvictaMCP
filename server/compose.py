@@ -1172,7 +1172,7 @@ def _start_clock(target, force):
     if refusal == "mission_phase":
         return False, refusal
     _try("time.speed", {"level": 5})
-    _resume()
+    _try("time.play")
     return armed, None
 
 
@@ -1327,19 +1327,6 @@ def _drop_note(answered):
     if reason:
         note += " (%s)" % reason
     return note
-
-
-def _resume():
-    """Ask for the clock. A reply carrying `held` is a refusal, not a failure.
-    Current DLLs never produce one (the engagement no longer holds the clock
-    for mission phases; colliding phase ticks are deferred instead), but the
-    shape stays understood so an older DLL still composes. Returns the hold
-    reason, or None when the clock started."""
-    reply = _try("time.play")
-    if isinstance(reply, dict):
-        return reply.get("held")
-    return None
-
 
 def _campaign_loaded():
     try:
@@ -2270,7 +2257,7 @@ def advance(args, progress=None):
                 # autoresolve machine needs frames rather than game time, and
                 # a running clock is the collision the hold exists to avoid.
                 if not holding_phase:
-                    _resume()
+                    _try("time.play")
                 continue    # let the autoresolver grind, keep polling
 
             dismissed = {}
@@ -2355,7 +2342,7 @@ def advance(args, progress=None):
                                 "know."))
                     break
                 if not holding_phase:
-                    _resume()
+                    _try("time.play")
                 continue
             unknown_polls = 0
             # The box, read once for the two things that need it under a mode
@@ -2446,13 +2433,10 @@ def advance(args, progress=None):
                 stuck = 0
                 box_polls = 0
                 was_waiting_for_box = False
-            # Counted, not stored: a sticky reason string outlives the hold and
-            # misattributes whatever the run stops on later. It does not touch
-            # `stuck`, which counts undismissable prompts only. Skipped
-            # entirely while a mission phase is being held for -- this call
-            # stopped the clock on purpose and must not ask for it back.
-            if not holding_phase and _resume():
-                digest["heldPolls"] = digest.get("heldPolls", 0) + 1
+            # Skipped entirely while a mission phase is being held for -- this
+            # call stopped the clock on purpose and must not ask for it back.
+            if not holding_phase:
+                _try("time.play")
     except BridgeTimeout as e:
         # A timeout on one of the loop's OTHER calls. The per-poll query.time
         # absorbs its own and keeps going; this one ends the call, but it is

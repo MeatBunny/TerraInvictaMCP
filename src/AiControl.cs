@@ -53,30 +53,6 @@ namespace TerraInvictaMCP
 
         static Notifications priorNotifications;
 
-        // True while the engagement is holding the clock for a mission phase.
-        static bool holdingClock;
-
-        // The hold is bounded. Two save-blocking prompts have no AI handler in
-        // HandlePrompts (PromptBeginCombat, and PromptSelectTrajectory -- the one
-        // that is handled is PromptChangeTrajectory, a different name). Either
-        // queued for the engaged faction parks every prep and plan coroutine on the
-        // save-blocking spin, so the busy flags never clear and an unbounded hold
-        // would re-pause forever. Pause() does not set the engine's blocked flag,
-        // so nothing else would name it. Planning takes frames, not minutes.
-        const float HoldBoundSeconds = 45f;
-
-        static float holdStartedAt = -1f;
-        static bool holdBoundTripped;
-
-        // Always false now: nothing sets holdActive since the clock hold was
-        // retired in favor of the deferral prefix. The time-verb gates that
-        // consult this always pass; they stay so the wire behavior needs no
-        // reasoning about a removed code path.
-        internal static bool HoldActive { get { return holdActive; } }
-        internal const string HoldReason = "mission phase";
-
-        static bool holdActive;
-
         public static bool Engaged { get { return engaged; } }
 
         // Whether a colliding mission-phase tick is actually being deferred right
@@ -188,10 +164,6 @@ namespace TerraInvictaMCP
             // whatever else fails below.
             engaged = false;
             brutal = false;
-            holdActive = false;
-            holdingClock = false;
-            holdBoundTripped = false;
-            holdStartedAt = -1f;
 
             // 2. Hand the faction back. Attempted even when the campaign identity
             // no longer matches: writing the flag on a discarded state is harmless,
@@ -223,8 +195,6 @@ namespace TerraInvictaMCP
             o["saveShim"] = saveShimInstalled;
             o["alertSuppression"] = audiencePatched;
             o["missionPhaseGuard"] = phaseGuardPatched;
-            o["holdingClockForMissionPhase"] = holdingClock;
-            o["holdBoundTripped"] = holdBoundTripped;
             o["deferredPhaseTicks"] = deferredPhaseTicks;
             o["resumedPauses"] = resumedPauses;
             o["difficultyWindows"] = windowsPatched;
@@ -431,12 +401,10 @@ namespace TerraInvictaMCP
         static int resumedPauses;
 
         // Inherent bias to finish: an engaged run should burn game time as fast as
-        // the game allows. Never while paused, never while disengaged. The
-        // holdActive check is inert (nothing sets the flag since Tick stopped
-        // calling HoldClockForMissionPhase) and stays only to avoid churn.
+        // the game allows. Never while paused, never while disengaged.
         static void PushSpeedToMax()
         {
-            if (!engaged || holdActive) return;
+            if (!engaged) return;
             try
             {
                 GameTimeManager manager = GameTimeManager.Singleton;
@@ -446,72 +414,6 @@ namespace TerraInvictaMCP
                 int max = speeds.Count - 1;
                 if (manager.currentSpeedIndex >= max) return;
                 manager.SetSpeed(max, false);
-            }
-            catch (Exception e) { Server.LastError = Verbs.Note(e); }
-        }
-
-        // RETIRED: no longer called from Tick. This paused the clock for the
-        // duration of every mission phase, which put a start-stop rhythm on
-        // every engaged run; the deferral prefix below (StartMissionPhasePrefix)
-        // closes the same collision without ever touching the clock, so the
-        // hold is gone. The function and its fields stay so the status payload
-        // keeps its shape (they read false) and the time-verb gates need no
-        // edit; nothing sets holdActive anymore.
-        static void HoldClockForMissionPhase()
-        {
-            bool busy;
-            try { busy = MissionPhaseBusy(); }
-            catch (Exception e) { Server.LastError = Verbs.Note(e); return; }
-
-            if (!busy)
-            {
-                holdActive = false;
-                holdingClock = false;
-                holdBoundTripped = false;
-                holdStartedAt = -1f;
-                return;
-            }
-
-            float now = Time.realtimeSinceStartup;
-            if (holdStartedAt < 0f) holdStartedAt = now;
-            if (holdBoundTripped) return;
-            if (now - holdStartedAt > HoldBoundSeconds)
-            {
-                // Degrade to pre-fix behavior with a visible flag rather than add a
-                // new silent freeze: stop re-pausing, say so in status, and name
-                // the likely cause once.
-                holdBoundTripped = true;
-                holdActive = false;
-                holdingClock = false;
-                bool blocked = false;
-                try { blocked = TIPromptQueueState.anyActivePlayerBlockingPrompt; }
-                catch (Exception) { }
-                Main.Log.Log("WARNING: mission-phase clock hold exceeded "
-                    + (int)HoldBoundSeconds + "s and was released. "
-                    + (blocked
-                        ? "A save-blocking prompt is queued for the engaged faction and no AI handler "
-                          + "will answer it; drive engaged runs through advance, which autoresolves."
-                        : "No blocking prompt is queued, so this is planning that outran the bound."));
-                return;
-            }
-
-            // Set before the pause: the time verbs consult this, and refusing to
-            // start the clock is what keeps the pause a one-off. The re-pause below
-            // stays as the fallback for anything else that unpauses (the game's own
-            // UI, DelayedUnpauseAssignmentPhaseEnd), which is rare rather than
-            // per-frame once the verbs stop fighting it.
-            holdActive = true;
-            try
-            {
-                GameTimeManager manager = GameTimeManager.Singleton;
-                if (manager == null) return;
-                if (manager.Paused)
-                {
-                    holdingClock = true;
-                    return;
-                }
-                manager.Pause();
-                holdingClock = true;
             }
             catch (Exception e) { Server.LastError = Verbs.Note(e); }
         }
