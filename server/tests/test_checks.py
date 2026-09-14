@@ -491,6 +491,31 @@ class LocaleTest(_fixtures.ModcheckTestCase):
         self.assertEqual([v["key"] for v in locale["verdicts"]],
                          ["TIOrgTemplate.displayName.Org_Bogus_2070"])
 
+    def test_an_en_file_in_a_subfolder_is_read(self):
+        # The game reads a mod folder recursively, and mods commonly keep
+        # localization under Localization/en/. e15 is the same org with no
+        # key anywhere: one missingKey.
+        self.add_mod("Deep", files={"TIOrgTemplate.json": [NEW_ORG]},
+                     nested={"Localization/en/TIOrgTemplate.en":
+                             "TIOrgTemplate.displayName.Org_New=New Group\n"})
+        result = self.run_modcheck()
+        self.assert_offline(result)
+        locale = check(result, "locale")
+        self.assertEqual(locale["summary"]["mods"], ["Deep"])
+        self.assertEqual(locale["verdicts"], [])
+        self.assertEqual(lints(locale), ["enOnly"])
+
+    def test_vanilla_key_shapes_are_not_phantoms(self):
+        # Objectives carry a faction suffix after the dataName and narrative
+        # events are written field-last; both name an entry that exists.
+        self.add_mod("Shapes", loc={"TIOrgTemplate.en":
+                                    "TIOrgTemplate.displayName.Org_Alpha."
+                                    "ResistCouncil=Alpha\n"
+                                    "TIOrgTemplate.Org_Alpha.summary=Alpha\n"})
+        result = self.run_modcheck()
+        self.assert_offline(result)
+        self.assertEqual(check(result, "locale")["verdicts"], [])
+
 
 class ModFolderTest(_fixtures.ModcheckTestCase):
     """E20 to E25: what modcheck makes of the folder itself."""
@@ -626,9 +651,9 @@ class EnumTableTest(_fixtures.ModcheckTestCase):
         self.assertIn("not a member of enum WeaponMount",
                       refs["verdicts"][0]["detail"])
         self.assertEqual(refs["summary"]["enumSource"], "cache")
-        # With no log and no globalgamemanagers in the fixture tree, the
-        # cache is also where the game version comes from.
-        self.assertEqual(refs["summary"]["gameVersion"], "1.0.51")
+        # No globalgamemanagers in the fixture tree, so the version is
+        # unknown; the baseline is keyed by the enum fingerprint as well.
+        self.assertEqual(refs["summary"]["gameVersion"], "unknown")
 
     def test_e28_with_no_table_the_same_mod_reports_clean(self):
         self.bad_enum_mod()

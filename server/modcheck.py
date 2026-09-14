@@ -24,7 +24,7 @@ dataName, arrays merged by index, TemplatesToConcatArrays /
 TemplatesToReplaceArrays / TemplatesToReplace, enum name-vs-ordinal
 resolution from the engine's own enum table (the `query.enums` verb, cached
 to modcheck_enums.dat), blank placeholders, cross-mod shadowing via
-LoadOrder, ghost detection, lenient JSON reading.
+LoadOrder, lenient JSON reading.
 
 Scenario semantics: DLC_Content/ is a third template source loaded even with
 mods off; registration order is metatemplates, vanilla, DLC with
@@ -33,6 +33,7 @@ collision is a shadow; differing tags are legal scenario variants; an
 untagged-vs-untagged collision is a silent drop; a tag no scenario declares
 is unreachable content.
 """
+import collections
 import gzip
 import hashlib
 import json
@@ -72,48 +73,18 @@ TYPE_DISCRIMINATOR = "$type"
 LOCALIZATION_RE = re.compile(
     r"\.(en|fr|deu|ger|spa|esp|chs|cht|cze|rus|pol|jpn|kor|por|ita|tur|ukr)$", re.I)
 
-# Files known to contain JSON even the lenient reader cannot always parse.
-KNOWN_BAD_VANILLA = {"TIMapGroupVisualizerTemplate.json", "TISpaceFleetTemplate.json"}
-
 CHECK_NAMES = ("merge", "refs", "locale", "conflicts", "reach")
 
 
 # ---------------------------------------------------------------- bridge import
 
-try:
-    from . import bridge as _bridge_default
-except ImportError:
-    sys.path.insert(0, _HERE)
-    try:
-        import bridge as _bridge_default
-    except ImportError:
-        _bridge_default = None
+sys.path.insert(0, _HERE)
+import bridge as _bridge_default                    # noqa: E402
 
 # Saves: bridge owns the resolution (Proton prefix on Linux, registry-resolved
 # Documents on Windows, TIBRIDGE_SAVES over both) so the tools and modcheck can
-# never disagree about where the saves are. The local branch below runs only if
-# server/bridge.py is missing entirely, and is deliberately the naive guess.
-if _bridge_default is not None:
-    SAVES_DIR = _bridge_default.SAVES_DIR
-elif os.name == "nt":
-    SAVES_DIR = os.environ.get("TIBRIDGE_SAVES") or os.path.join(
-        os.environ.get("USERPROFILE") or os.path.expanduser("~"),
-        "Documents", "My Games", "TerraInvicta", "Saves")
-else:
-    SAVES_DIR = os.environ.get("TIBRIDGE_SAVES") or os.path.join(
-        os.path.abspath(os.path.join(ROOT, "..", "..")), "compatdata",
-        "1176470", "pfx", "drive_c", "users", "steamuser", "Documents",
-        "My Games", "TerraInvicta", "Saves")
-
-
-def _default_bridge():
-    """The server's bridge module, or None if it could not be imported.
-
-    None only happens if server/bridge.py is missing: it imports nothing but
-    the standard library, so the import above cannot fail for any other
-    reason. _Session handles None by reporting the bridge as down.
-    """
-    return _bridge_default
+# never disagree about where the saves are.
+SAVES_DIR = _bridge_default.SAVES_DIR
 
 
 class _Session:
@@ -139,10 +110,6 @@ class _Session:
         """Feature-detect: is the bridge up, and which verbs does it serve."""
         if self.up is not None:
             return self.up
-        if self.bridge is None:
-            self.up = False
-            self.error = "no bridge module available"
-            return False
         try:
             ver = self.call("version")
             self.version = ver.get("data", {}) if ver.get("ok") else {}
@@ -160,11 +127,7 @@ class _Session:
         return self.up
 
     def serves(self, verb):
-        """True when the verb is known-served, or when the registry is
-        unavailable (older DLLs lack `verbs`; let the call itself decide)."""
-        if not self.probe():
-            return False
-        return verb in self.served or not self.served
+        return self.probe() and verb in self.served
 
 
 # ---------------------------------------------------------------- lenient JSON
@@ -252,28 +215,6 @@ _VERSION_RE = re.compile(r"\d{4}\.\d+\.\d+f\d+|\d+\.\d+\.\d+")
 _EDITOR_VERSION_RE = re.compile(r"\d{4}\.\d+\.\d+f\d+$")
 
 
-def _version_from_cache():
-    """The game version the cached enum table was captured against."""
-    doc = EnumTable.read_cache()
-    v = (doc or {}).get("gameVersion")
-    return v if isinstance(v, str) and _VERSION_RE.match(v) else None
-
-
-def _version_from_log():
-    """`Current Version:` from the game log. Only written at campaign start,
-    so a fresh install has no such line."""
-    try:
-        with open(os.path.join(ROOT, "Logs", "TerraInvicta.log"),
-                  errors="replace") as f:
-            for line in f:
-                m = re.search(r"Current Version:?\s*(\d+\.\d+\.\d+)", line)
-                if m:
-                    return m.group(1)
-    except OSError:
-        pass
-    return None
-
-
 def _version_from_unity():
     """Unity's bundleVersion, near the head of globalgamemanagers. Present on
     every install, with or without a log, a campaign, or the game running."""
@@ -290,17 +231,8 @@ def _version_from_unity():
     return None
 
 
-def _installed_version():
-    """The version on disk, independent of the enum cache -- the thing to
-    compare a cached table's own gameVersion against."""
-    return _version_from_log() or _version_from_unity()
-
-
-def _game_version():
-    """The installed game version, best effort, for baseline keying. The disk
-    comes first: the cache's version is the one its table was captured
-    against, which after an update is the version that is no longer there."""
-    return (_installed_version() or _version_from_cache() or "unknown")
+# The installed game version, for baseline keying.
+_game_version = lambda: _version_from_unity() or "unknown"   # noqa: E731
 
 
 def _ordinal_set(value):
@@ -465,15 +397,15 @@ class EnumTable:
         return doc if EnumTable._well_formed(doc) else None
 
     def _write_cache(self, doc):
-        # Temp file plus rename: an interrupted write must not leave a
-        # truncated table that the next run has to detect and discard.
+        # Temp file plus rename: an interrupted write must not leave the next
+        # offline run with no table. A read-only install still gets a working
+        # table this run.
         tmp = "%s.%d.tmp" % (ENUM_CACHE_PATH, os.getpid())
         try:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(doc, f, separators=(",", ":"), sort_keys=True)
             os.replace(tmp, ENUM_CACHE_PATH)
         except OSError:
-            # A read-only install still gets a working table this run.
             try:
                 os.remove(tmp)
             except OSError:
@@ -564,12 +496,6 @@ class EnumTable:
                       self.meta.get("capturedAt") or "unknown",
                       self.meta.get("gameVersion") or "unknown",
                       self._reason(), self._action()))
-            installed = _installed_version()
-            cached = self.meta.get("gameVersion")
-            if installed and cached and installed != cached:
-                msg += (" The game on disk is %s, so any enum member the "
-                        "update added or removed is missing from this table."
-                        % installed)
             out.append(msg)
         if self.stale_against:
             out.append(
@@ -646,16 +572,12 @@ def _enum_meta():
 
 # ---------------------------------------------------------------- merge sim
 
-def is_number(v):
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
-
-
 def numbers_equal(a, b):
     return math.isclose(float(a), float(b), rel_tol=1e-6, abs_tol=1e-9)
 
 
 def as_number(v):
-    if is_number(v):
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
         return float(v)
     if isinstance(v, str):
         try:
@@ -714,18 +636,12 @@ def merge_value(base, patch, array_mode):
     return patch
 
 
-def merged_disable(entry):
-    return bool(entry.get("disable"))
-
-
 # ---------------------------------------------------------------- comparison
 
-class Ctx:
-    """Per-file merge context."""
-
-    def __init__(self, array_mode, template_class=None):
-        self.array_mode = array_mode          # "merge" | "concat" | "replace"
-        self.template_class = template_class  # for enum-typed field lookups
+# Per-file merge context: array_mode is "merge" | "concat" | "replace",
+# template_class scopes enum-typed field lookups.
+Ctx = collections.namedtuple("Ctx", "array_mode template_class",
+                             defaults=(None,))
 
 
 class Compare:
@@ -746,13 +662,7 @@ class Compare:
     def note(self, path, msg):
         self.notes.append("%s: %s" % (path, msg))
 
-    def field(self, name, modv, gamev, game_has, vanv, van_has):
-        """One top-level field of a mod entry."""
-        if modv is not None and van_has and self.deep_equal(modv, vanv):
-            self.noops.append(name)
-        self.walk(name, modv, gamev, game_has, vanv)
-
-    def walk(self, path, modv, gamev, game_has, vanv=None):
+    def walk(self, path, modv, gamev, game_has):
         if modv is None:
             # MergeNullValueHandling is Ignore: a null leaves the vanilla
             # value alone.
@@ -764,10 +674,10 @@ class Compare:
             return
 
         if isinstance(modv, dict):
-            self.walk_dict(path, modv, gamev, vanv)
+            self.walk_dict(path, modv, gamev)
             return
         if isinstance(modv, list):
-            self.walk_list(path, modv, gamev, vanv)
+            self.walk_list(path, modv, gamev)
             return
 
         self.checked += 1
@@ -816,7 +726,7 @@ class Compare:
             return ENUMS.matches_ordinal(gamev, modv, cls, field)
         return False
 
-    def walk_dict(self, path, modv, gamev, vanv=None):
+    def walk_dict(self, path, modv, gamev):
         if gamev is None:
             if is_blank(modv):
                 self.note(path, "mod wrote a blank placeholder object, game "
@@ -828,14 +738,12 @@ class Compare:
             self.problem(path, "expected an object, game has %s"
                          % json.dumps(gamev)[:120])
             return
-        van = vanv if isinstance(vanv, dict) else {}
         for k, v in modv.items():
             if k == TYPE_DISCRIMINATOR:
                 continue
-            self.walk("%s.%s" % (path, k), v, gamev.get(k), k in gamev,
-                      van.get(k))
+            self.walk("%s.%s" % (path, k), v, gamev.get(k), k in gamev)
 
-    def walk_list(self, path, modv, gamev, vanv=None):
+    def walk_list(self, path, modv, gamev):
         if gamev is None:
             if is_blank(modv):
                 self.note(path, "mod wrote a blank placeholder array, game "
@@ -865,29 +773,18 @@ class Compare:
         if self.ctx.array_mode == "replace" and len(modv) != len(gamev):
             self.problem(path, "replace mode: mod has %d element(s), game "
                                "has %d" % (len(modv), len(gamev)))
-        van = vanv if isinstance(vanv, list) else []
         for i, item in enumerate(modv):
             if i >= len(gamev):
                 self.problem("%s[%d]" % (path, i),
                              "merged array stops at %d element(s)" % len(gamev))
                 continue
-            vitem = van[i] if i < len(van) else None
-            if self.ctx.array_mode == "merge":
-                self.check_alignment("%s[%d]" % (path, i), item, vitem, modv)
-            self.walk("%s[%d]" % (path, i), item, gamev[i], True, vitem)
+            self.walk("%s[%d]" % (path, i), item, gamev[i], True)
+        # Array pathologies against vanilla (an empty array that cannot
+        # clear, a displaced element) are the static pass's job.
         if self.ctx.array_mode == "merge" and len(gamev) > len(modv):
-            if not modv and van:
-                # An empty source array contributes nothing to an index merge,
-                # so the vanilla list survives whole. Clearing a list needs the
-                # file listed in TemplatesToReplaceArrays.
-                self.warnings.append(
-                    "%s: mod writes an empty array, which an index merge "
-                    "cannot clear; all %d vanilla element(s) survive"
-                    % (path, len(gamev)))
-            else:
-                self.note(path, "%d trailing vanilla element(s) kept past the "
-                                "mod's %d (arrays merge by index)"
-                                % (len(gamev) - len(modv), len(modv)))
+            self.note(path, "%d trailing vanilla element(s) kept past the "
+                            "mod's %d (arrays merge by index)"
+                            % (len(gamev) - len(modv), len(modv)))
 
     def check_alignment(self, path, item, vitem, mod_list):
         """An index-merged element that overwrites a vanilla element nothing
@@ -957,11 +854,8 @@ def dlc_template_dirs():
 
 
 class ModFile:
-    def __init__(self, mod, filename, path, entries, error, array_mode,
-                 whole_replace):
-        self.mod = mod
+    def __init__(self, filename, entries, error, array_mode, whole_replace):
         self.filename = filename
-        self.path = path
         self.entries = entries or {}
         self.error = error
         self.array_mode = array_mode
@@ -977,7 +871,6 @@ class Mod:
         self.files = []
         self.modinfo = {}
         self.modinfo_error = None
-        self.unchecked = []
         self.stray_json = []     # JSON files that match no vanilla template
         self.loc_files = []      # localization files in the folder
 
@@ -999,40 +892,11 @@ def name_list(info, key):
     return {str(x).strip().lower() for x in v if isinstance(x, str) and x.strip()}
 
 
-def classify_extras(folder):
-    """Files in a mod folder the template checker has no way to verify."""
-    out = []
-    try:
-        names = sorted(os.listdir(folder))
-    except OSError:
-        return out
-    for n in names:
-        full = os.path.join(folder, n)
-        if os.path.isdir(full):
-            continue
-        ext = os.path.splitext(n)[1].lower()
-        if n == "ModInfo.json" or ext == ".json":
-            continue
-        if LOCALIZATION_RE.search(n):
-            out.append("%s (localization)" % n)
-        elif ext in (".png", ".jpg"):
-            continue
-        elif ext in ("", ".manifest") and not n.startswith("."):
-            out.append("%s (asset bundle)" % n)
-        elif ext in (".txt", ".xml", ".md", ".dll", ".cache", ".xlsx", ".pdf",
-                     ".wav", ".ogg", ".bank", ".sh", ".py", ".cs"):
-            continue
-        else:
-            out.append(n)
-    return out
-
-
 def _mod_from_folder(name, folder):
     """One enabled mod, read from disk."""
     mod = Mod(name, folder)
     mod.modinfo, mod.modinfo_error = read_mod_info(folder)
     mod.load_order = get_ci(mod.modinfo, "LoadOrder", 0) or 0
-    mod.unchecked = classify_extras(folder)
     vanilla = set(vanilla_filenames())
     concat = name_list(mod.modinfo, "TemplatesToConcatArrays")
     replace_arr = name_list(mod.modinfo, "TemplatesToReplaceArrays")
@@ -1044,6 +908,12 @@ def _mod_from_folder(name, folder):
     for n in names:
         full = os.path.join(folder, n)
         if os.path.isdir(full):
+            # The game reads a mod folder recursively; localization commonly
+            # sits under Localization/<lang>/.
+            for dirpath, _dirs, files in os.walk(full):
+                mod.loc_files.extend(os.path.join(dirpath, f)
+                                     for f in sorted(files)
+                                     if LOCALIZATION_RE.search(f))
             continue
         if LOCALIZATION_RE.search(n):
             mod.loc_files.append(full)
@@ -1057,7 +927,7 @@ def _mod_from_folder(name, folder):
         mode = ("concat" if low in concat else
                 "replace" if low in replace_arr else "merge")
         entries, err = load_entries(full)
-        mod.files.append(ModFile(name, n, full, entries, err, mode, low in whole))
+        mod.files.append(ModFile(n, entries, err, mode, low in whole))
     return mod
 
 
@@ -1078,23 +948,6 @@ def collect_mods_disk(only=None):
         if mod.files or mod.stray_json or mod.loc_files:
             mods[name] = mod
     return mods
-
-
-def _bridge_file_path(rec):
-    """The loader reports a Wine-side path (drive letter, backslashes); the
-    file on this side of the prefix is under Mods/Enabled/<mod>/<file>."""
-    cand = os.path.join(MODS_ENABLED, rec["mod"], rec["file"])
-    if os.path.isfile(cand):
-        return cand
-    rp = re.sub(r"^[A-Za-z]:", "", (rec.get("path") or "").replace("\\", "/"))
-    if os.path.isfile(rp):
-        return rp
-    i = rp.find("/Mods/")
-    if i >= 0:
-        deep = os.path.join(ROOT, rp[i + 1:])
-        if os.path.isfile(deep):
-            return deep
-    return cand     # let load_entries report the miss
 
 
 def collect_mods_bridge(mods_list, only=None):
@@ -1120,9 +973,17 @@ def collect_mods_bridge(mods_list, only=None):
         low = fn.lower()
         mode = ("concat" if low in concat else
                 "replace" if low in replace_arr else "merge")
-        full = _bridge_file_path(rec)
+        # The loader records `mod` as the file's immediate parent folder, so
+        # a file nested below the mod folder resolves through the recorded
+        # (Wine-side) path instead.
+        full = os.path.join(MODS_ENABLED, rec["mod"], rec["file"])
+        if not os.path.isfile(full):
+            rp = re.sub(r"^[A-Za-z]:", "",
+                        (rec.get("path") or "").replace("\\", "/"))
+            if os.path.isfile(rp):
+                full = rp
         entries, err = load_entries(full)
-        mod.files.append(ModFile(name, fn, full, entries, err, mode, low in whole))
+        mod.files.append(ModFile(fn, entries, err, mode, low in whole))
     return mods
 
 
@@ -1168,9 +1029,8 @@ class Universe:
             else:
                 entries, err = load_entries(os.path.join(tdir, fn))
             if err:
-                if fn not in KNOWN_BAD_VANILLA:
-                    self.file_errors.append({"source": label, "file": fn,
-                                             "error": err})
+                self.file_errors.append({"source": label, "file": fn,
+                                         "error": err})
                 continue
             bucket = self.classes.setdefault(cls, {})
             for dn, entry in entries.items():
@@ -1234,7 +1094,7 @@ class Universe:
             # Drop entries whose merged disable is true: TemplateManager never
             # registers them.
             for cls, bucket in self.classes.items():
-                dead = [dn for dn, e in bucket.items() if merged_disable(e)]
+                dead = [dn for dn, e in bucket.items() if bool(e.get("disable"))]
                 for dn in dead:
                     del bucket[dn]
 
@@ -1246,13 +1106,8 @@ class Universe:
             if entry.get("newCampaignOptionCategory") == "Scenario" or \
                     entry.get("isNewCampaignOption"):
                 self.scenarios[dn] = {
-                    "dataName": dn,
-                    "friendlyName": entry.get("friendlyName"),
                     "tags": list(tags),
-                    "prefix": entry.get("scenarioPrefix"),
                     "postfix": entry.get("scenarioLocalizationPostfix"),
-                    "picker": bool(entry.get("isNewCampaignOption")),
-                    "templateNames": entry.get("templateNames") or [],
                 }
                 self.declared_tags.update(tags)
 
@@ -1288,31 +1143,6 @@ def _check_result(status, summary, verdicts, warnings, lints, verbose,
             if len(items) > cap:
                 out[key] = items[:cap]
                 out["summary"]["%sTruncated" % key] = len(items) - cap
-    return out
-
-
-_IDENT_KEYS = ("mod", "file", "dataName", "warning")
-
-
-def _dedupe_findings(findings):
-    """Collapse repeats of the same finding, keeping the first.
-
-    check_merge's static and in-engine passes reach the same array
-    pathologies by different routes (vanilla vs the merged entry), so with
-    the game up each one is raised twice. The static pass runs first and
-    carries the nextStep, so first-wins keeps the richer copy. A finding
-    missing any identifying key cannot be told apart from another one and is
-    passed through untouched."""
-    out, seen = [], set()
-    for f in findings:
-        if any(k not in f for k in _IDENT_KEYS):
-            out.append(f)
-            continue
-        ident = tuple(f[k] for k in _IDENT_KEYS)
-        if ident in seen:
-            continue
-        seen.add(ident)
-        out.append(f)
     return out
 
 
@@ -1375,7 +1205,7 @@ def _merge_offline_mod(mod, verdicts, warnings, lints):
                 nextStep=_NEXT["UNPARSED"]))
             continue
         van, van_err = vanilla_entries(mf.filename)
-        if van_err and mf.filename not in KNOWN_BAD_VANILLA:
+        if van_err:
             warnings.append(_finding(
                 mod=mod.name, file=mf.filename,
                 warning="vanilla %s could not be parsed (%s); new-entry "
@@ -1384,8 +1214,8 @@ def _merge_offline_mod(mod, verdicts, warnings, lints):
         for dn in sorted(mf.entries):
             entry = mf.entries[dn]
             van_entry = (van or {}).get(dn)
-            if merged_disable(merge_value(van_entry or {}, entry,
-                                          mf.array_mode)):
+            if bool(merge_value(van_entry or {}, entry,
+                                mf.array_mode).get("disable")):
                 verdicts.append(_finding(
                     mod=mod.name, file=mf.filename, dataName=dn,
                     verdict="DISABLED",
@@ -1437,7 +1267,7 @@ def _merge_offline_mod(mod, verdicts, warnings, lints):
 
 def _merge_online(session, mods, index, verbose, verdicts, warnings, lints):
     """The in-engine half: every field the mod sets vs the merged entry the
-    running game holds, plus DLL mod status and ghost detection."""
+    running game holds, plus DLL mod status."""
     checked = 0
     cache = {}
     for mod in mods.values():
@@ -1455,8 +1285,8 @@ def _merge_online(session, mods, index, verbose, verdicts, warnings, lints):
                 if not resp.get("ok"):
                     entry = mf.entries[dn]
                     van_entry = (van or {}).get(dn)
-                    if merged_disable(merge_value(van_entry or {}, entry,
-                                                  mf.array_mode)):
+                    if bool(merge_value(van_entry or {}, entry,
+                                        mf.array_mode).get("disable")):
                         continue    # DISABLED, reported statically
                     verdicts.append(_finding(
                         mod=mod.name, file=mf.filename, dataName=dn,
@@ -1480,17 +1310,11 @@ def _merge_online(session, mods, index, verbose, verdicts, warnings, lints):
                     continue
                 ctx = Ctx(mf.array_mode, mf.template_class)
                 cmp = Compare(ctx)
-                van_entry = (van or {}).get(dn)
                 for field, value in mf.entries[dn].items():
                     if field == "dataName":
                         continue
-                    cmp.field(field, value, game.get(field), field in game,
-                              (van_entry or {}).get(field),
-                              bool(van_entry) and field in van_entry)
+                    cmp.walk(field, value, game.get(field), field in game)
                 checked += cmp.checked
-                for w in cmp.warnings:
-                    warnings.append(_finding(mod=mod.name, file=mf.filename,
-                                             dataName=dn, warning=w))
                 if verbose:
                     for nt in cmp.notes:
                         lints.append(_finding(mod=mod.name, file=mf.filename,
@@ -1578,36 +1402,6 @@ def _merge_dll_online(session, mods_list, only, verdicts, warnings):
                         "registers terminal commands looks like this)"))
 
 
-def _merge_ghosts(mods_list, verdicts):
-    """A mod folder that is not enabled must not show up in either loader."""
-    t = mods_list["templates"]
-    disabled = set(t["folders"].get("disabled") or [])
-    loaded_dll = set()
-    for e in mods_list.get("dll") or []:
-        loaded_dll.add(e.get("id") or "")
-        loaded_dll.add(e.get("displayName") or "")
-        loaded_dll.add(os.path.basename(
-            (e.get("path") or "").replace("\\", "/").rstrip("/")))
-    for folder in sorted(disabled):
-        if folder in loaded_dll:
-            verdicts.append(_finding(
-                mod=folder, kind="ghost", verdict="MISMATCH",
-                detail="in Mods/Disabled but appears among the loaded UMM mods",
-                nextStep="restart the game; the UMM loader only rescans at boot"))
-        if folder in set(t.get("enabled") or []):
-            verdicts.append(_finding(
-                mod=folder, kind="ghost", verdict="MISMATCH",
-                detail="in Mods/Disabled but the template loader accepted it",
-                nextStep="restart the game; template mods only load at boot"))
-    on_disk = set(t["folders"].get("enabled") or [])
-    for folder in sorted(set(t.get("enabled") or []) - on_disk):
-        verdicts.append(_finding(
-            mod=folder, kind="ghost", verdict="MISMATCH",
-            detail="accepted by the template loader but not in Mods/Enabled "
-                   "on disk",
-            nextStep="the folder moved or was deleted after boot; restart"))
-
-
 def check_merge(session, only_mod, verbose):
     verdicts, warnings, lints = [], [], []
     degraded = []
@@ -1654,10 +1448,6 @@ def check_merge(session, only_mod, verbose):
     fields_static = 0
     for mod in mods.values():
         fields_static += _merge_offline_mod(mod, verdicts, warnings, lints)
-        if mod.unchecked and verbose:
-            lints.append(_finding(mod=mod.name, lint="unchecked",
-                                  detail="out of template-check scope: %s"
-                                         % ", ".join(mod.unchecked)))
 
     fields_engine = 0
     if mods_list is not None:
@@ -1665,17 +1455,11 @@ def check_merge(session, only_mod, verbose):
             fields_engine = _merge_online(session, mods, index, verbose,
                                           verdicts, warnings, lints)
             _merge_dll_online(session, mods_list, only_mod, verdicts, warnings)
-            if not only_mod:
-                _merge_ghosts(mods_list, verdicts)
         except session.bridge.BridgeError as e:
             degraded.append(
                 "bridge stopped answering mid-run: %s -- the game's main "
                 "thread is probably wedged inside a query; it will need a "
                 "restart" % e)
-
-    # Both passes above append into the same list, so this has to run before
-    # the count and the list are read, or they disagree.
-    warnings = _dedupe_findings(warnings)
 
     degraded.extend(ENUMS.notes())
     # DISABLED is the data asking for it (TemplateManager drops an entry
@@ -1861,34 +1645,21 @@ def _ref_findings(universe, session=None):
             detail="tech prerequisite cycle: %s" % " -> ".join(members),
             nextStep="break the cycle; none of these techs can ever unlock"))
 
-    reachable = {}
-
-    def reach_of(dn):
-        # Iterative: a tech is researchable when every prereq resolves and is
-        # itself researchable; cycles and dangling prereqs poison the chain.
-        pending = [dn]
-        while pending:
-            cur = pending[-1]
-            if cur in reachable:
-                pending.pop()
-                continue
-            if cur in on_cycle:
-                reachable[cur] = False
-                pending.pop()
-                continue
-            deps = prereqs.get(cur, [])
-            missing = [d for d in deps if d not in prereqs]
-            unresolved = [d for d in deps if d in prereqs and d not in reachable]
-            if unresolved:
-                pending.extend(unresolved)
-                continue
-            reachable[cur] = not missing and all(
-                reachable[d] for d in deps if d in prereqs)
-            pending.pop()
-        return reachable[dn]
+    # Fixpoint: a tech is researchable when every prereq resolves and is
+    # itself researchable. A dangling prereq never enters the set, a cycle
+    # member is excluded, and their dependents never enter either.
+    reachable = set()
+    changed = True
+    while changed:
+        changed = False
+        for dn, deps in prereqs.items():
+            if dn not in reachable and dn not in on_cycle and \
+                    all(d in reachable for d in deps):
+                reachable.add(dn)
+                changed = True
 
     for dn in sorted(prereqs):
-        if not reach_of(dn):
+        if dn not in reachable:
             key = "unreachable|TITechTemplate|%s" % dn
             findings.append(_finding(
                 kind="unreachable", key=key, **{"class": "TITechTemplate"},
@@ -1989,21 +1760,8 @@ def check_refs(session, only_mod, scenario, verbose):
     version = session.version.get("game") if online else None
     version = version or _game_version()
 
-    source = "disk"
-    if online and session.serves("query.template"):
-        # The bridge is the truthful source for merged data, but pulling the
-        # full reference graph needs bulk mode; feature-detect it.
-        try:
-            probe = session.call("query.template", type="TITechTemplate",
-                                 fields=["prereqs"], limit=1)
-            if probe.get("ok") and isinstance(probe.get("data"), dict) and \
-                    "entries" in probe["data"]:
-                source = "bridge-bulk"
-            else:
-                source = "bridge-perentry"
-        except session.bridge.BridgeError as e:
-            degraded.append("bridge stopped answering: %s" % e)
-            online = False
+    source = "bridge" if online and session.serves("query.template") \
+        else "disk"
 
     uni = Universe(include_mods=True, only_mod=None)
     for fe in uni.file_errors:
@@ -2013,10 +1771,8 @@ def check_refs(session, only_mod, scenario, verbose):
                 warning="unparseable, excluded from the reference graph: %s"
                         % fe["error"]))
 
-    if source == "bridge-bulk":
+    if source == "bridge":
         _overlay_bridge_bulk(session, uni, degraded)
-    elif source == "bridge-perentry":
-        _overlay_bridge_perentry(session, uni, degraded)
     else:
         degraded.append(
             "bridge unreachable; the reference graph was computed from a "
@@ -2118,27 +1874,6 @@ def _overlay_bridge_bulk(session, uni, degraded):
             return
 
 
-def _overlay_bridge_perentry(session, uni, degraded):
-    """The DLL lacks bulk mode: fetch each checked entry singly. Costly, so
-    only entries the disk simulation knows about are fetched."""
-    calls = 0
-    for cls in list(REF_RULES):
-        bucket = uni.classes.get(cls) or {}
-        for dn in sorted(bucket):
-            try:
-                resp = session.call("query.template", type=cls, dataName=dn)
-            except session.bridge.BridgeError as e:
-                degraded.append("bridge stopped answering at %s/%s after %d "
-                                "calls: %s" % (cls, dn, calls, e))
-                return
-            calls += 1
-            if resp.get("ok"):
-                t = resp["data"].get("template")
-                if isinstance(t, dict):
-                    bucket[dn] = t
-    degraded.append("DLL lacks query.template bulk mode; fell back to %d "
-                    "per-entry calls" % calls)
-
 
 # ---------------------------------------------------------------- locale check
 
@@ -2221,7 +1956,7 @@ def check_locale(session, only_mod, scenario, verbose):
             m = _LOC_KEY_RE.match(key)
             if not m:
                 continue
-            cls, _field, dn = m.groups()
+            cls, field, dn = m.groups()
             if cls not in uni.classes:
                 continue    # not a template-keyed line
             base_dn = dn
@@ -2230,7 +1965,14 @@ def check_locale(session, only_mod, scenario, verbose):
                 if pf and base_dn.endswith(pf):
                     base_dn = base_dn[:-len(pf)]
                     break
-            if base_dn not in uni.classes[cls]:
+            known = uni.classes[cls]
+            # Two vanilla key shapes the matcher misreads: objectives carry a
+            # faction suffix (<Class>.<field>.<dataName>.<Faction>) and
+            # narrative events are written field-last
+            # (<Class>.<dataName>.<field>).
+            if base_dn.rpartition(".")[0] in known or field in known:
+                continue
+            if base_dn not in known:
                 verdicts.append(_finding(
                     mod=mod.name, verdict="MISMATCH", kind="phantomKey",
                     key=key,
@@ -2531,8 +2273,7 @@ def check_conflicts(session, only_mod, scenario, verbose):
             # Legal scenario variants. Reported per scenario when one is
             # named; otherwise only when a mod is party to the collision --
             # vanilla-vs-DLC variants are the shipped design, not findings.
-            mod_involved = "mod:" in col["winner"] + col["loser"] or \
-                (col["class"], col["dataName"]) in uni.mod_touched
+            mod_involved = (col["class"], col["dataName"]) in uni.mod_touched
             if not scenario and not mod_involved:
                 variant_only_count += 1
                 continue
@@ -2544,18 +2285,6 @@ def check_conflicts(session, only_mod, scenario, verbose):
                        "the scenario's and ranks by tag intersection"
                        % (col["class"], col["dataName"], col["winner"],
                           sorted(wt), col["loser"], sorted(lt)))
-            if scenario and scenario in uni.scenarios:
-                stags = set(uni.scenarios[scenario]["tags"])
-                cands = []
-                for src, tags in ((col["winner"], wt), (col["loser"], lt)):
-                    if tags <= stags:
-                        cands.append((len(tags & stags), src, sorted(tags)))
-                cands.sort(reverse=True)
-                item["scenarioResolution"] = {
-                    "scenario": scenario,
-                    "winner": cands[0][1] if cands else None,
-                    "candidates": [{"source": s, "tags": t}
-                                   for _r, s, t in cands]}
             lints.append(item)
         unknown = (wt | lt) - uni.declared_tags
         for tag in sorted(unknown):
@@ -2567,8 +2296,7 @@ def check_conflicts(session, only_mod, scenario, verbose):
                          "drop it"))
     # Tags on mod entries that no scenario declares.
     for (cls, dn), tags in uni.tags.items():
-        if uni.origin.get((cls, dn), "").startswith("mod:") or \
-                (cls, dn) in uni.mod_touched:
+        if (cls, dn) in uni.mod_touched:
             for tag in tags:
                 if tag not in uni.declared_tags:
                     lints.append(_finding(
@@ -2745,18 +2473,15 @@ def save_check(name=None):
     """Offline save compatibility: the save's templateName references and
     TIMetadataState metadata vs the merged template universe."""
     verdicts, warnings, lints = [], [], []
-    degraded = []
     saves = _list_saves()
     if not saves:
-        return {"status": "FAIL", "summary": {
-            "error": "no saves found in %s" % SAVES_DIR}, "verdicts": [],
-            "warnings": [], "lints": []}
+        return _check_result("FAIL", {"error": "no saves found in %s"
+                                      % SAVES_DIR}, [], [], [], True)
     if name:
         fname = _resolve_save(name, saves)
         if fname is None:
-            return {"status": "FAIL", "summary": {
-                "error": "no save named %r" % name, "saves": saves[:20]},
-                "verdicts": [], "warnings": [], "lints": []}
+            return _check_result("FAIL", {"error": "no save named %r" % name,
+                                          "saves": saves[:20]}, [], [], [], True)
     else:
         fname = saves[0]
     path = os.path.join(SAVES_DIR, fname)
@@ -2767,9 +2492,8 @@ def save_check(name=None):
         with opener(path, "rt", encoding="utf-8-sig", errors="replace") as f:
             data = json.load(f)
     except (OSError, ValueError, EOFError) as e:
-        return {"status": "FAIL", "summary": {
-            "error": "could not read %s: %s" % (fname, e)}, "verdicts": [],
-            "warnings": [], "lints": []}
+        return _check_result("FAIL", {"error": "could not read %s: %s"
+                                      % (fname, e)}, [], [], [], True)
 
     gamestates = data.get("gamestates") or {}
     meta = {}
@@ -2867,14 +2591,6 @@ def save_check(name=None):
             perMod={m: v[:20] for m, v in sorted(at_risk.items())},
             nextStep="keep these mods enabled for this campaign"))
 
-    bridge_mod = _default_bridge()
-    session = _Session(bridge_mod)
-    if not session.probe():
-        degraded.append(
-            "game not running: the universe diff used the disk-side merge "
-            "simulation. In-engine registration (what TemplateManager "
-            "actually kept) needs the game up.")
-
     problems = len(verdicts)
     summary = {
         "save": fname,
@@ -2890,11 +2606,8 @@ def save_check(name=None):
         "danglingRefs": len(dangling),
         "problems": problems,
     }
-    if degraded:
-        summary["degraded"] = degraded
-    return {"status": _status(problems, warnings, degraded),
-            "summary": summary, "verdicts": verdicts, "warnings": warnings,
-            "lints": lints}
+    return _check_result(_status(problems, warnings, []), summary, verdicts,
+                         warnings, lints, True)
 
 
 def _mod_data_names(mods_dir):
@@ -2961,9 +2674,6 @@ def workshop_status(mod=None):
             m = _OUTDATED_RE.search(desc)
             if m:
                 item["selfDeclared"] = m.group(1)
-            vers = re.findall(r"1\.0\.\d+", desc + " " + name)
-            if vers:
-                item["versionsMentioned"] = sorted(set(vers))
             mtime = 0
             for dirpath, _dirs, files in os.walk(folder):
                 for f in files:
@@ -3054,16 +2764,6 @@ def workshop_status(mod=None):
                         % item["selfDeclared"],
                 nextStep="read the workshop page before trusting the mod on "
                          "the current game version"))
-        vers = item.get("versionsMentioned")
-        if vers and game_version != "unknown":
-            newest = max(vers, key=lambda v: [int(x) for x in v.split(".")])
-            if [int(x) for x in newest.split(".")] < \
-                    [int(x) for x in game_version.split(".")]:
-                lints.append(_finding(
-                    mod=item["mod"], lint="versionMention",
-                    detail="newest game version mentioned is %s; the game is "
-                           "%s -- the mod may predate current-patch changes"
-                           % (newest, game_version)))
 
     problems = len(verdicts)
     summary = {
@@ -3091,10 +2791,9 @@ def run(bridge, mod=None, check="all", scenario=None, verbose=False):
     elif check in CHECK_NAMES:
         selected = [check]
     else:
-        return {"status": "ERROR", "summary": {
-            "error": "unknown check %r" % check,
-            "known": list(CHECK_NAMES) + ["all"]},
-            "verdicts": [], "warnings": [], "lints": []}
+        return _check_result("ERROR", {"error": "unknown check %r" % check,
+                                       "known": list(CHECK_NAMES) + ["all"]},
+                             [], [], [], True)
 
     session = _Session(bridge)
     session.probe()
@@ -3110,10 +2809,9 @@ def run(bridge, mod=None, check="all", scenario=None, verbose=False):
         try:
             checks[name] = runners[name]()
         except Exception as e:  # a check must never take the tool down
-            checks[name] = {
-                "status": "ERROR",
-                "summary": {"error": "%s: %s" % (type(e).__name__, e)},
-                "verdicts": [], "warnings": [], "lints": []}
+            checks[name] = _check_result(
+                "ERROR", {"error": "%s: %s" % (type(e).__name__, e)},
+                [], [], [], True)
 
     problems = sum(c["summary"].get("problems", len(c.get("verdicts") or []))
                    for c in checks.values())
@@ -3163,5 +2861,5 @@ if __name__ == "__main__":
     elif _check == "workshop_status":
         _out = workshop_status(_mod)
     else:
-        _out = run(_default_bridge(), mod=_mod, check=_check)
+        _out = run(_bridge_default, mod=_mod, check=_check)
     print(json.dumps(_out, indent=2))

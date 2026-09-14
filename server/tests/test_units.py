@@ -178,19 +178,12 @@ class CompareTest(unittest.TestCase):
 
     def test_field_mismatch_becomes_a_problem(self):
         c = self.cmp()
-        c.field("crew", 4, 2, True, 1, True)
+        c.walk("crew", 4, 2, True)
         self.assertEqual(c.problems, ["crew: expected 4, game has 2"])
-        self.assertEqual(c.noops, [])
-
-    def test_field_equal_to_vanilla_is_a_noop(self):
-        c = self.cmp()
-        c.field("crew", 2, 2, True, 2, True)
-        self.assertEqual(c.noops, ["crew"])
-        self.assertEqual(c.problems, [])
 
     def test_absent_member_is_a_note_not_a_problem(self):
         c = self.cmp()
-        c.field("noSuchField", 1, None, False, None, False)
+        c.walk("noSuchField", 1, None, False)
         self.assertEqual(c.problems, [])
         self.assertEqual(len(c.notes), 1)
         self.assertIn("no such member", c.notes[0])
@@ -222,17 +215,20 @@ class CompareTest(unittest.TestCase):
 
     def test_merge_mode_keeps_trailing_vanilla_elements_as_a_note(self):
         c = self.cmp()
-        c.walk("list", ["a"], ["a", "b"], True, ["a", "b"])
+        c.walk("list", ["a"], ["a", "b"], True)
         self.assertEqual(c.problems, [])
         self.assertEqual(c.warnings, [])
         self.assertIn("trailing vanilla element", c.notes[0])
 
-    def test_merge_mode_warns_that_an_empty_array_cannot_clear(self):
+    def test_merge_mode_leaves_the_empty_array_warning_to_the_static_pass(self):
+        # The static pass in _merge_offline_mod raises the empty-array
+        # warning against vanilla (test_checks e3); the in-engine walk only
+        # notes the surviving elements, so the two never report it twice.
         c = self.cmp()
-        c.walk("list", [], ["a", "b"], True, ["a", "b"])
+        c.walk("list", [], ["a", "b"], True)
         self.assertEqual(c.problems, [])
-        self.assertEqual(len(c.warnings), 1)
-        self.assertIn("index merge cannot clear", c.warnings[0])
+        self.assertEqual(c.warnings, [])
+        self.assertIn("trailing vanilla element", c.notes[0])
 
     def test_concat_mode_accepts_an_element_anywhere_in_the_result(self):
         c = self.cmp("concat")
@@ -340,13 +336,11 @@ class FindShadowersTest(unittest.TestCase):
     def setUp(self):
         self.ctx = modcheck.Ctx("merge", "TITechTemplate")
         self.mod = modcheck.Mod("Mine", "/fixture/Mine")
-        self.mf = modcheck.ModFile("Mine", "TITechTemplate.json",
-                                   "/fixture/Mine/TITechTemplate.json",
+        self.mf = modcheck.ModFile("TITechTemplate.json",
                                    {"Tech_Beta": {"researchCost": 1234}},
                                    None, "merge", False)
-        self.other = modcheck.ModFile("Theirs", "TITechTemplate.json",
-                                      "/fixture/Theirs/TITechTemplate.json",
-                                      {}, None, "merge", False)
+        self.other = modcheck.ModFile("TITechTemplate.json", {}, None,
+                                      "merge", False)
 
     def find(self, setters, game, problems):
         index = {("TITechTemplate", "Tech_Beta", "researchCost"): setters}
@@ -385,96 +379,6 @@ class FindShadowersTest(unittest.TestCase):
         self.assertEqual(len(out), 1)
         self.assertIn("set materials to the value the game holds", out[0])
 
-
-class DedupeFindingsTest(unittest.TestCase):
-    """_dedupe_findings is what keeps check_merge's two passes from reporting
-    the same array pathology twice. The static pass and the in-engine pass
-    reach the identical warning by different routes, so with the game up every
-    index-merge warning landed in the list (and in summary.warnings) twice."""
-
-    WARNING = ("effects: mod writes an empty array, which an index merge "
-               "cannot clear; all 3 vanilla element(s) survive")
-
-    def offline(self, **kw):
-        """The static pass's shape: modcheck.py:1384, with a nextStep."""
-        fields = dict(mod="Mine", file="TITechTemplate.json",
-                      dataName="Tech_Beta", warning=self.WARNING,
-                      nextStep="restate the full vanilla array, or list the "
-                               "file in TemplatesToConcatArrays / "
-                               "TemplatesToReplaceArrays")
-        fields.update(kw)
-        return modcheck._finding(**fields)
-
-    def online(self, **kw):
-        """The in-engine pass's shape: modcheck.py:1457, no nextStep."""
-        fields = dict(mod="Mine", file="TITechTemplate.json",
-                      dataName="Tech_Beta", warning=self.WARNING)
-        fields.update(kw)
-        return modcheck._finding(**fields)
-
-    def test_the_two_passes_collapse_to_the_richer_copy(self):
-        out = modcheck._dedupe_findings([self.offline(), self.online()])
-        self.assertEqual(out, [self.offline()])
-        self.assertIn("nextStep", out[0])
-
-    def test_the_surviving_copy_is_the_same_object_not_a_rebuild(self):
-        first = self.offline()
-        out = modcheck._dedupe_findings([first, self.online()])
-        self.assertIs(out[0], first)
-
-    def test_the_input_list_is_left_alone(self):
-        findings = [self.offline(), self.online()]
-        modcheck._dedupe_findings(findings)
-        self.assertEqual(len(findings), 2)
-
-    def test_order_is_preserved(self):
-        a = self.offline(dataName="Tech_A")
-        b = self.offline(dataName="Tech_B")
-        c = self.offline(dataName="Tech_C")
-        out = modcheck._dedupe_findings([a, b, c, self.online(
-            dataName="Tech_B")])
-        self.assertEqual([f["dataName"] for f in out],
-                         ["Tech_A", "Tech_B", "Tech_C"])
-
-    def test_a_different_warning_on_the_same_entry_survives(self):
-        other = self.online(
-            warning="effects[0]: overwrites the vanilla element name="
-                    '"Gun_Coilgun", which the mod never restates')
-        out = modcheck._dedupe_findings([self.offline(), other])
-        self.assertEqual(len(out), 2)
-
-    def test_the_same_warning_on_another_entry_survives(self):
-        out = modcheck._dedupe_findings(
-            [self.offline(), self.offline(dataName="Tech_Gamma")])
-        self.assertEqual(len(out), 2)
-
-    def test_the_same_warning_in_another_file_survives(self):
-        out = modcheck._dedupe_findings(
-            [self.offline(), self.offline(file="TIOrgTemplate.json")])
-        self.assertEqual(len(out), 2)
-
-    def test_the_same_warning_from_another_mod_survives(self):
-        out = modcheck._dedupe_findings(
-            [self.offline(), self.offline(mod="Theirs")])
-        self.assertEqual(len(out), 2)
-
-    def test_findings_without_the_identifying_keys_pass_through(self):
-        # The 'use mods' warning carries no mod, file or dataName. Two such
-        # findings must not read as one another's duplicate.
-        bare = modcheck._finding(warning="the 'use mods' setting is off")
-        out = modcheck._dedupe_findings([bare, dict(bare), self.offline()])
-        self.assertEqual(len(out), 3)
-
-    def test_a_mod_scoped_finding_with_no_file_passes_through(self):
-        # The ModInfo warning (modcheck.py:1333) has a mod and no file.
-        info = modcheck._finding(mod="Mine",
-                                 warning="ModInfo.json is not valid JSON",
-                                 nextStep="fix ModInfo.json")
-        out = modcheck._dedupe_findings([info, dict(info)])
-        self.assertEqual(len(out), 2)
-
-    def test_an_empty_list_is_an_empty_list(self):
-        self.assertEqual(modcheck._dedupe_findings([]), [])
 
 
 if __name__ == "__main__":

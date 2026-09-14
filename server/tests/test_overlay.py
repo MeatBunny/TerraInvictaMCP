@@ -55,17 +55,6 @@ class BulkBridge(OfflineBridge):
                 "truncated": False}
 
 
-class PerEntryBridge(BulkBridge):
-    """An older DLL: query.template answers one entry, never a page."""
-
-    def template(self, args):
-        dn = args.get("dataName")
-        for entry in self.ENTRIES.get(args["type"], []):
-            if entry["dataName"] == dn:
-                return {"template": dict(entry)}
-        return {"template": {"dataName": dn}}
-
-
 class OverlayTest(_fixtures.ModcheckTestCase):
 
     def vanilla_effects(self, dn="Tech_Beta"):
@@ -79,9 +68,9 @@ class OverlayTest(_fixtures.ModcheckTestCase):
         return modcheck.check_refs(modcheck._Session(bridge), None, None,
                                    True)
 
-    def test_the_per_entry_overlay_leaves_the_vanilla_cache_alone(self):
+    def test_the_overlay_leaves_the_vanilla_cache_alone(self):
         before = list(self.vanilla_effects())
-        self.run_refs(PerEntryBridge())
+        self.run_refs(BulkBridge())
         self.assertEqual(self.vanilla_effects(), before)
 
     def test_a_live_only_dangling_ref_is_reported_not_baselined(self):

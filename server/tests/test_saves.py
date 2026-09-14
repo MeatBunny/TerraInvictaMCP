@@ -11,32 +11,21 @@ save named". Worse when the two formats sat side by side: an older `.gz`
 outranked the save just written and nothing said which file had been read.
 
 Nothing here needs a running game -- that is the point of these two readers.
-The bridge is forced down so both take their offline path.
 """
 import gzip
 import json
 import os
 import unittest
-from unittest import mock
 
 # Arms the guard that fails any case which would dial a running game.
 import _offline                                     # noqa: F401
 import _fixtures
-from _fixtures import OfflineBridge, modcheck
+from _fixtures import modcheck
 import resources
 
 
 class SaveFixture(_fixtures.ModcheckTestCase):
-    """A saves folder under the fixture tree, and no bridge behind it."""
-
-    def setUp(self):
-        super(SaveFixture, self).setUp()
-        # save_check reaches for the real bridge module; keep it in the
-        # fixture and off the loopback port.
-        patcher = mock.patch.object(modcheck, "_default_bridge",
-                                    return_value=OfflineBridge())
-        patcher.start()
-        self.addCleanup(patcher.stop)
+    """A saves folder under the fixture tree."""
 
     def write_save(self, filename, mtime=None, gamestates=None):
         path = os.path.join(modcheck.SAVES_DIR, filename)
