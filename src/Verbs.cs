@@ -482,18 +482,6 @@ namespace TerraInvictaMCP
             return o;
         }
 
-        // True when the block above says a phase is open. Prepping and planning
-        // are reported but do not refuse an arm: they are set for whole
-        // stretches of an ordinary tick and refusing on them would stop every
-        // run, while only phaseActive names the branch that corrupts.
-        static bool PhaseIsActive(JToken phase)
-        {
-            var o = phase as JObject;
-            if (o == null) return false;
-            JToken t = o["active"];
-            return t != null && t.Type == JTokenType.Boolean && (bool)t;
-        }
-
         static JToken Blocked(GameTimeManager manager)
         {
             return Safe<JToken>(delegate { return new JValue(manager.IsBlocked); }, JValue.CreateNull());
@@ -699,36 +687,12 @@ namespace TerraInvictaMCP
             return members;
         }
 
-        // Values rendered whole rather than dumped member by member. Templates collapse
-        // to a data name, as they do inside an expanded list.
+        // Values rendered whole rather than dumped member by member: the element types
+        // an expanded list holds, plus TIDateTime, rendered the same way a list entry
+        // is. The caller answers for a TIGameState before it gets here.
         static JToken ScalarToken(object v)
         {
-            var template = v as TIDataTemplate;
-            if (template != null)
-            {
-                return Safe<JToken>(
-                    delegate { return new JValue(template.dataName); }, JValue.CreateNull());
-            }
-            Type t = v.GetType();
-            if (v is string || v is TIDateTime || t.IsEnum) return Value(v);
-            switch (Type.GetTypeCode(t))
-            {
-                case TypeCode.Boolean:
-                case TypeCode.Char:
-                case TypeCode.SByte:
-                case TypeCode.Byte:
-                case TypeCode.Int16:
-                case TypeCode.UInt16:
-                case TypeCode.Int32:
-                case TypeCode.UInt32:
-                case TypeCode.Int64:
-                case TypeCode.UInt64:
-                case TypeCode.Single:
-                case TypeCode.Double:
-                case TypeCode.Decimal:
-                    return Value(v);
-            }
-            return null;
+            return v is TIDateTime || Expandable(v.GetType()) ? Element(v) : null;
         }
 
         #region Path walking
@@ -1013,6 +977,19 @@ namespace TerraInvictaMCP
                 if (t != null) return t;
             }
             // A bare class name in a namespace nobody guessed still resolves.
+            return SweepTypes(delegate(Type candidate)
+            {
+                return string.Equals(candidate.Name, name, StringComparison.Ordinal);
+            });
+        }
+
+        // Every type of every loaded assembly, first one the test accepts. An assembly
+        // that refuses to list its types is skipped rather than failing the sweep.
+        static Type SweepTypes(Func<Type, bool> accept)
+        {
+            Assembly[] loaded;
+            try { loaded = AppDomain.CurrentDomain.GetAssemblies(); }
+            catch (Exception) { return null; }
             for (int i = 0; i < loaded.Length; i++)
             {
                 Type[] types;
@@ -1020,8 +997,7 @@ namespace TerraInvictaMCP
                 catch (Exception) { continue; }
                 for (int j = 0; j < types.Length; j++)
                 {
-                    if (string.Equals(types[j].Name, name, StringComparison.Ordinal))
-                        return types[j];
+                    if (accept(types[j])) return types[j];
                 }
             }
             return null;
@@ -1127,8 +1103,8 @@ namespace TerraInvictaMCP
         }
 
         // Lists and single-dimension arrays expand when their declared element type is
-        // something depth 1 can render: a game state, a template, a string, an enum, or
-        // a number or bool. A nested list, or a collection of arbitrary objects, stays
+        // something depth 1 can render: a game state, a template, a string, a char, an
+        // enum, or a number or bool. A nested list, or a collection of arbitrary objects, stays
         // a type name. An over-long list is cut at the cap: at the endpoint the cut is
         // reported through ReportCut, and inside a member dump it stays silent, as it
         // has always been.
@@ -1166,23 +1142,9 @@ namespace TerraInvictaMCP
             if (typeof(TIGameState).IsAssignableFrom(element)) return true;
             if (typeof(TIDataTemplate).IsAssignableFrom(element)) return true;
             if (element == typeof(string) || element.IsEnum) return true;
-            switch (Type.GetTypeCode(element))
-            {
-                case TypeCode.Boolean:
-                case TypeCode.SByte:
-                case TypeCode.Byte:
-                case TypeCode.Int16:
-                case TypeCode.UInt16:
-                case TypeCode.Int32:
-                case TypeCode.UInt32:
-                case TypeCode.Int64:
-                case TypeCode.UInt64:
-                case TypeCode.Single:
-                case TypeCode.Double:
-                case TypeCode.Decimal:
-                    return true;
-            }
-            return false;
+            // Boolean through Decimal is the contiguous run of primitives and Char.
+            TypeCode c = Type.GetTypeCode(element);
+            return c >= TypeCode.Boolean && c <= TypeCode.Decimal;
         }
 
         // Templates collapse to their data name, the handle every other verb takes;
@@ -1434,7 +1396,10 @@ namespace TerraInvictaMCP
             // run with the clock down and nothing that ever re-arms it. The
             // deferral needs the StartNewMissionPhase prefix installed, which is
             // why the test is not `engaged` alone.
-            if (PhaseIsActive(phase) && !Flag(args, "force")
+            // Only phaseActive refuses. Prepping and planning are reported but are
+            // set for whole stretches of an ordinary tick, so refusing on them would
+            // stop every run.
+            if ((bool)((JObject)phase)["active"] && !Flag(args, "force")
                 && !AiControl.PhaseDeferralActive)
                 throw new VerbError("mission_phase: a mission phase is open "
                     + "(missionPhase " + phase.ToString(Formatting.None) + "), and arming a "
@@ -2133,12 +2098,7 @@ namespace TerraInvictaMCP
             return name;
         }
 
-        static JArray ToArray(List<string> lines)
-        {
-            return ToArray(lines, int.MaxValue);
-        }
-
-        static JArray ToArray(List<string> lines, int max)
+        static JArray ToArray(List<string> lines, int max = int.MaxValue)
         {
             var a = new JArray();
             if (lines == null) return a;
@@ -2159,6 +2119,40 @@ namespace TerraInvictaMCP
             JToken t = args != null ? args[key] : null;
             if (t == null || t.Type == JTokenType.Null) throw new VerbError("missing arg '" + key + "'");
             return WholeNumber(t, key);
+        }
+
+        // A caller's 'limit' clamped to the verb's own default and ceiling.
+        static int Limit(JObject args, int def, int max)
+        {
+            int limit = OptionalInt(args, "limit");
+            if (limit <= 0) limit = def;
+            if (limit > max) limit = max;
+            return limit;
+        }
+
+        // A JArray of strings, or one string, trimmed with the blanks dropped. Empty
+        // is the caller's to interpret; over the cap is a refusal.
+        static List<string> StringList(JToken t, int max, string what)
+        {
+            var list = new List<string>();
+            var array = t as JArray;
+            if (array != null)
+            {
+                for (int i = 0; i < array.Count; i++)
+                {
+                    string s = array[i] != null && array[i].Type != JTokenType.Null
+                        ? array[i].ToString().Trim() : null;
+                    if (!string.IsNullOrEmpty(s)) list.Add(s);
+                }
+            }
+            else
+            {
+                string s = t.ToString().Trim();
+                if (s.Length > 0) list.Add(s);
+            }
+            if (list.Count > max)
+                throw new VerbError("at most " + max + " " + what + " per call");
+            return list;
         }
 
         // Filter args are absent far more often than not; -1 means "no filter", and
@@ -2272,17 +2266,12 @@ namespace TerraInvictaMCP
         }
 
         // Public instance fields, then the readable non-indexed public instance
-        // properties. Callers apply their own attribute filters.
-        static List<MemberInfo> ReadableMembers(Type type)
-        {
-            return ReadableMembers(type, false);
-        }
-
-        // With includePrivate, the non-public instance members follow, taken one
-        // declaring type at a time because reflection does not inherit them. A private
-        // member whose name a public one already took is skipped, so asking for more
-        // never changes what the public dump reported.
-        static List<MemberInfo> ReadableMembers(Type type, bool includePrivate)
+        // properties. Callers apply their own attribute filters. With includePrivate,
+        // the non-public instance members follow, taken one declaring type at a time
+        // because reflection does not inherit them. A private member whose name a
+        // public one already took is skipped, so asking for more never changes what
+        // the public dump reported.
+        static List<MemberInfo> ReadableMembers(Type type, bool includePrivate = false)
         {
             var members = new List<MemberInfo>();
             var seen = new Dictionary<string, bool>(StringComparer.Ordinal);

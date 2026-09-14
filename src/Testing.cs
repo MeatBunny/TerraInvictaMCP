@@ -116,7 +116,8 @@ namespace TerraInvictaMCP
             JToken keysToken = args["keys"];
             if (keysToken != null && keysToken.Type != JTokenType.Null)
             {
-                List<string> keys = KeyList(keysToken);
+                List<string> keys = StringList(keysToken, MaxLocalizeKeys, "keys");
+                if (keys.Count == 0) throw new VerbError("arg 'keys' is empty");
                 for (int i = 0; i < keys.Count; i++)
                     results.Add(ResolveKey(keys[i], null, table, english));
             }
@@ -149,30 +150,6 @@ namespace TerraInvictaMCP
             o["truncated"] = false;
             o["results"] = results;
             return o;
-        }
-
-        static List<string> KeyList(JToken keysToken)
-        {
-            var keys = new List<string>();
-            var array = keysToken as JArray;
-            if (array != null)
-            {
-                for (int i = 0; i < array.Count; i++)
-                {
-                    string key = array[i] != null && array[i].Type != JTokenType.Null
-                        ? array[i].ToString().Trim() : null;
-                    if (!string.IsNullOrEmpty(key)) keys.Add(key);
-                }
-            }
-            else
-            {
-                string key = keysToken.ToString().Trim();
-                if (key.Length > 0) keys.Add(key);
-            }
-            if (keys.Count == 0) throw new VerbError("arg 'keys' is empty");
-            if (keys.Count > MaxLocalizeKeys)
-                throw new VerbError("at most " + MaxLocalizeKeys + " keys per call");
-            return keys;
         }
 
         // Candidates most-specific first: postfixed key in the requested language, then
@@ -443,9 +420,7 @@ namespace TerraInvictaMCP
                     throw new VerbError("no template class named '" + wanted + "'");
             }
             string dataNameFilter = Str(args, "dataName");
-            int limit = OptionalInt(args, "limit");
-            if (limit <= 0) limit = MaxDupeRows;
-            if (limit > MaxDupeRowLimit) limit = MaxDupeRowLimit;
+            int limit = Limit(args, MaxDupeRows, MaxDupeRowLimit);
 
             var keys = new List<string>();
             var rows = new List<JObject>();
@@ -482,15 +457,9 @@ namespace TerraInvictaMCP
                 }
             }
 
-            string[] keyArray = keys.ToArray();
-            JObject[] rowArray = rows.ToArray();
-            Array.Sort(keyArray, rowArray, StringComparer.Ordinal);
-
-            var a = new JArray();
-            int n = rowArray.Length < limit ? rowArray.Length : limit;
-            for (int i = 0; i < n; i++) a.Add(rowArray[i]);
+            JArray a = SortedPage(keys, rows, limit);
             var o = new JObject();
-            AddPage(o, a, rowArray.Length, limit);
+            AddPage(o, a, rows.Count, limit);
             o["duplicates"] = a;
             return o;
         }
@@ -639,9 +608,7 @@ namespace TerraInvictaMCP
             string wanted, JObject args)
         {
             UnityEngine.AssetBundle bundle = FindBundle(bundles, wanted);
-            int limit = OptionalInt(args, "limit");
-            if (limit <= 0) limit = MaxBundleAssets;
-            if (limit > MaxBundleAssetLimit) limit = MaxBundleAssetLimit;
+            int limit = Limit(args, MaxBundleAssets, MaxBundleAssetLimit);
 
             string[] assets;
             try { assets = bundle.GetAllAssetNames(); }
@@ -808,7 +775,7 @@ namespace TerraInvictaMCP
         static JToken QueryDesigns(JObject args)
         {
             TIFactionState faction = Arg<TIFactionState>(args, "faction");
-            int limit = ListLimit(args);
+            int limit = Limit(args, MaxListRows, MaxListRowLimit);
             List<TISpaceShipTemplate> designs = Safe<List<TISpaceShipTemplate>>(
                 delegate { return faction.shipDesigns; }, null);
 
@@ -864,7 +831,7 @@ namespace TerraInvictaMCP
         static JToken QueryCouncilors(JObject args)
         {
             int factionFilter = OptionalInt(args, "faction");
-            int limit = ListLimit(args);
+            int limit = Limit(args, MaxListRows, MaxListRowLimit);
             var a = new JArray();
             int total = 0;
             foreach (TICouncilorState councilor in GameStateManager.IterateByClass<TICouncilorState>(false))
@@ -901,7 +868,7 @@ namespace TerraInvictaMCP
         static JToken QueryNations(JObject args)
         {
             string contains = Str(args, "contains");
-            int limit = ListLimit(args);
+            int limit = Limit(args, MaxListRows, MaxListRowLimit);
             var keys = new List<string>();
             var rows = new List<JObject>();
             foreach (TINationState nation in GameStateManager.IterateByClass<TINationState>(false))
@@ -933,15 +900,9 @@ namespace TerraInvictaMCP
                 rows.Add(o);
             }
 
-            string[] keyArray = keys.ToArray();
-            JObject[] rowArray = rows.ToArray();
-            Array.Sort(keyArray, rowArray, StringComparer.Ordinal);
-
-            var a = new JArray();
-            int n = rowArray.Length < limit ? rowArray.Length : limit;
-            for (int i = 0; i < n; i++) a.Add(rowArray[i]);
+            JArray a = SortedPage(keys, rows, limit);
             var result = new JObject();
-            AddPage(result, a, rowArray.Length, limit);
+            AddPage(result, a, rows.Count, limit);
             result["nations"] = a;
             return result;
         }
@@ -966,14 +927,6 @@ namespace TerraInvictaMCP
                 a.Add(o);
             }
             return a;
-        }
-
-        static int ListLimit(JObject args)
-        {
-            int limit = OptionalInt(args, "limit");
-            if (limit <= 0) limit = MaxListRows;
-            if (limit > MaxListRowLimit) limit = MaxListRowLimit;
-            return limit;
         }
 
         #endregion

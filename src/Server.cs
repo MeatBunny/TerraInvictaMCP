@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -110,8 +111,7 @@ namespace TerraInvictaMCP
                 var stream = client.GetStream();
                 var encoding = new UTF8Encoding(false);
                 byte[] chunk = new byte[4096];
-                byte[] pending = new byte[1024];
-                int pendingLen = 0;
+                var pending = new MemoryStream();
                 while (true)
                 {
                     int n = stream.Read(chunk, 0, chunk.Length);
@@ -121,10 +121,11 @@ namespace TerraInvictaMCP
                         byte b = chunk[i];
                         if (b == 10)
                         {
-                            int len = pendingLen;
-                            if (len > 0 && pending[len - 1] == 13) len--;
-                            string line = encoding.GetString(pending, 0, len);
-                            pendingLen = 0;
+                            int len = (int)pending.Length;
+                            byte[] buf = pending.GetBuffer();
+                            if (len > 0 && buf[len - 1] == 13) len--;
+                            string line = encoding.GetString(buf, 0, len);
+                            pending.SetLength(0);
                             if (line.Trim().Length == 0) continue;
                             // Parsing stays outside the lock, but the closed test and
                             // the enqueue are one critical section. Split, they let a
@@ -147,21 +148,13 @@ namespace TerraInvictaMCP
                             }
                             continue;
                         }
-                        if (pendingLen >= MaxLineBytes)
+                        if (pending.Length >= MaxLineBytes)
                         {
                             Server.LastError = "line exceeded " + MaxLineBytes + " bytes, connection closed";
                             Close();
                             return;
                         }
-                        if (pendingLen == pending.Length)
-                        {
-                            int grow = pending.Length * 2;
-                            if (grow > MaxLineBytes) grow = MaxLineBytes;
-                            byte[] bigger = new byte[grow];
-                            Buffer.BlockCopy(pending, 0, bigger, 0, pendingLen);
-                            pending = bigger;
-                        }
-                        pending[pendingLen++] = b;
+                        pending.WriteByte(b);
                     }
                 }
             }

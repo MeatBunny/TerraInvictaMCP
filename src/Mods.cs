@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Reflection;
+using HarmonyLib;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using PavonisInteractive.TerraInvicta;
@@ -364,12 +365,15 @@ namespace TerraInvictaMCP
             if (offset < 0) offset = 0;
 
             // Bulk mode: named members projected across every matching entry in one call.
-            List<string> fields = FieldList(args);
-            if (fields != null) return TemplateFields(type, all, contains, fields, args, offset);
+            JToken fieldsToken = args != null ? args["fields"] : null;
+            if (fieldsToken != null && fieldsToken.Type != JTokenType.Null)
+            {
+                List<string> fields = StringList(fieldsToken, MaxFieldNames, "fields");
+                if (fields.Count > 0)
+                    return TemplateFields(type, all, contains, fields, args, offset);
+            }
 
-            int limit = OptionalInt(args, "limit");
-            if (limit <= 0) limit = MaxTemplateNames;
-            if (limit > MaxTemplateNameLimit) limit = MaxTemplateNameLimit;
+            int limit = Limit(args, MaxTemplateNames, MaxTemplateNameLimit);
 
             var matched = new List<string>();
             for (int i = 0; i < all.Length; i++)
@@ -403,39 +407,10 @@ namespace TerraInvictaMCP
         const int MaxFieldEntriesLimit = 2000;
         const int MaxFieldNames = 32;
 
-        // 'fields' as a list of member names or a single name; null means no bulk mode.
-        static List<string> FieldList(JObject args)
-        {
-            JToken t = args != null ? args["fields"] : null;
-            if (t == null || t.Type == JTokenType.Null) return null;
-            var fields = new List<string>();
-            var array = t as JArray;
-            if (array != null)
-            {
-                for (int i = 0; i < array.Count; i++)
-                {
-                    string name = array[i] != null && array[i].Type != JTokenType.Null
-                        ? array[i].ToString().Trim() : null;
-                    if (!string.IsNullOrEmpty(name)) fields.Add(name);
-                }
-            }
-            else
-            {
-                string name = t.ToString().Trim();
-                if (name.Length > 0) fields.Add(name);
-            }
-            if (fields.Count == 0) return null;
-            if (fields.Count > MaxFieldNames)
-                throw new VerbError("at most " + MaxFieldNames + " fields per call");
-            return fields;
-        }
-
         static JToken TemplateFields(Type type, TIDataTemplate[] all, string contains,
             List<string> fields, JObject args, int offset)
         {
-            int limit = OptionalInt(args, "limit");
-            if (limit <= 0) limit = MaxFieldEntries;
-            if (limit > MaxFieldEntriesLimit) limit = MaxFieldEntriesLimit;
+            int limit = Limit(args, MaxFieldEntries, MaxFieldEntriesLimit);
 
             // Sorted by data name so offset paging is stable across calls.
             var matched = new List<TIDataTemplate>();
@@ -542,6 +517,18 @@ namespace TerraInvictaMCP
             return map;
         }
 
+        // Rows keyed for a stable ordinal order, then the first page of them.
+        static JArray SortedPage(List<string> keys, List<JObject> rows, int limit)
+        {
+            string[] keyArray = keys.ToArray();
+            JObject[] rowArray = rows.ToArray();
+            Array.Sort(keyArray, rowArray, StringComparer.Ordinal);
+            var a = new JArray();
+            int n = rowArray.Length < limit ? rowArray.Length : limit;
+            for (int i = 0; i < n; i++) a.Add(rowArray[i]);
+            return a;
+        }
+
         // The paging triple every list verb reports: how many candidates exist, how
         // many rode along, and whether the limit cut the list.
         static void AddPage(JObject o, JArray items, int total, int limit)
@@ -630,26 +617,16 @@ namespace TerraInvictaMCP
         // Assembly-CSharp falls back to a by-name sweep of everything loaded.
         static Type ScanForTemplateType(string[] variants)
         {
-            Assembly[] loaded;
-            try { loaded = AppDomain.CurrentDomain.GetAssemblies(); }
-            catch (Exception) { return null; }
-            for (int i = 0; i < loaded.Length; i++)
+            return SweepTypes(delegate(Type t)
             {
-                Type[] types;
-                try { types = loaded[i].GetTypes(); }
-                catch (Exception) { continue; }
-                for (int j = 0; j < types.Length; j++)
+                if (!IsTemplateType(t)) return false;
+                for (int k = 0; k < variants.Length; k++)
                 {
-                    Type t = types[j];
-                    if (!IsTemplateType(t)) continue;
-                    for (int k = 0; k < variants.Length; k++)
-                    {
-                        if (string.Equals(t.Name, variants[k], StringComparison.OrdinalIgnoreCase))
-                            return t;
-                    }
+                    if (string.Equals(t.Name, variants[k], StringComparison.OrdinalIgnoreCase))
+                        return true;
                 }
-            }
-            return null;
+                return false;
+            });
         }
 
         // Abstract bases are kept: they hold no entries of their own but answer for their
@@ -978,108 +955,30 @@ namespace TerraInvictaMCP
             }
         }
 
-        // Harmony is reached by reflection: the bridge patches nothing and must load with
-        // no Harmony present at all.
-        static bool harmonyProbed;
-        static string harmonyVersion;
-        static MethodInfo harmonyGetAllPatched;
-        static MethodInfo harmonyGetPatchInfo;
-        static FieldInfo[] patchKindFields;
-        static FieldInfo patchOwnerField;
-
-        static readonly string[] PatchKinds = new string[] {
-            "Prefixes", "Postfixes", "Transpilers", "Finalizers"
-        };
-
-        // Latched only on a hit, so a Harmony that arrives with a later mod is still found.
-        static void ProbeHarmony()
-        {
-            if (harmonyProbed) return;
-            try
-            {
-                Type harmony = null;
-                Assembly[] loaded = AppDomain.CurrentDomain.GetAssemblies();
-                for (int i = 0; i < loaded.Length && harmony == null; i++)
-                {
-                    try { harmony = loaded[i].GetType("HarmonyLib.Harmony", false); }
-                    catch (Exception) { }
-                }
-                if (harmony == null) return;
-                harmonyProbed = true;
-
-                Assembly asm = harmony.Assembly;
-                try { harmonyVersion = asm.GetName().Version.ToString(); }
-                catch (Exception) { }
-                harmonyGetAllPatched = harmony.GetMethod("GetAllPatchedMethods",
-                    BindingFlags.Public | BindingFlags.Static);
-                harmonyGetPatchInfo = harmony.GetMethod("GetPatchInfo",
-                    BindingFlags.Public | BindingFlags.Static);
-
-                Type patches = asm.GetType("HarmonyLib.Patches", false);
-                if (patches != null)
-                {
-                    var fields = new FieldInfo[PatchKinds.Length];
-                    bool complete = true;
-                    for (int i = 0; i < PatchKinds.Length; i++)
-                    {
-                        fields[i] = patches.GetField(PatchKinds[i],
-                            BindingFlags.Public | BindingFlags.Instance);
-                        if (fields[i] == null) complete = false;
-                    }
-                    // A kind that no longer binds would report [] for every method and
-                    // make the owner filter miss patches, so a partial surface counts
-                    // as no Harmony at all.
-                    if (complete) patchKindFields = fields;
-                }
-                Type patch = asm.GetType("HarmonyLib.Patch", false);
-                if (patch != null)
-                    patchOwnerField = patch.GetField("owner",
-                        BindingFlags.Public | BindingFlags.Instance);
-            }
-            catch (Exception) { }
-        }
-
+        // Harmony is linked (Main.cs constructs one), so it is called directly.
         static JToken HarmonyPatches(JObject args)
         {
-            ProbeHarmony();
             var o = new JObject();
-            o["harmony"] = harmonyVersion;
-            AddPage(o, new JArray(), 0, 0);
-            o["methods"] = new JArray();
-            if (harmonyGetAllPatched == null || harmonyGetPatchInfo == null
-                || patchKindFields == null || patchOwnerField == null) return o;
+            o["harmony"] = typeof(Harmony).Assembly.GetName().Version.ToString();
 
             string owner = Str(args, "owner");
-            int limit = OptionalInt(args, "limit");
-            if (limit <= 0) limit = MaxHarmonyMethods;
-            if (limit > MaxHarmonyMethodLimit) limit = MaxHarmonyMethodLimit;
-
-            IEnumerable methods;
-            try { methods = harmonyGetAllPatched.Invoke(null, null) as IEnumerable; }
-            catch (Exception e)
-            {
-                throw new VerbError("harmony enumeration failed: " + e.GetType().Name);
-            }
-            if (methods == null) return o;
+            int limit = Limit(args, MaxHarmonyMethods, MaxHarmonyMethodLimit);
 
             var keys = new List<string>();
             var rows = new List<JObject>();
-            foreach (object entry in methods)
+            foreach (MethodBase method in Harmony.GetAllPatchedMethods())
             {
-                var method = entry as MethodBase;
                 if (method == null) continue;
-                object info = null;
-                try { info = harmonyGetPatchInfo.Invoke(null, new object[] { method }); }
-                catch (Exception) { }
+                Patches info = Harmony.GetPatchInfo(method);
                 if (info == null) continue;
 
-                var kinds = new JArray[patchKindFields.Length];
+                var kinds = new JArray[] {
+                    Owners(info.Prefixes), Owners(info.Postfixes),
+                    Owners(info.Transpilers), Owners(info.Finalizers)
+                };
                 bool wanted = string.IsNullOrEmpty(owner);
-                for (int i = 0; i < patchKindFields.Length; i++)
-                {
-                    kinds[i] = PatchOwners(info, patchKindFields[i]);
-                    if (!wanted) wanted = HasOwner(kinds[i], owner);
-                }
+                for (int i = 0; i < kinds.Length && !wanted; i++)
+                    wanted = HasOwner(kinds[i], owner);
                 if (!wanted) continue;
 
                 string declaring = null;
@@ -1092,39 +991,27 @@ namespace TerraInvictaMCP
                 var row = new JObject();
                 row["type"] = declaring;
                 row["method"] = method.Name;
-                for (int i = 0; i < patchKindFields.Length; i++)
-                    row[PatchKinds[i].ToLowerInvariant()] = kinds[i];
+                row["prefixes"] = kinds[0];
+                row["postfixes"] = kinds[1];
+                row["transpilers"] = kinds[2];
+                row["finalizers"] = kinds[3];
                 keys.Add(declaring + "." + method.Name);
                 rows.Add(row);
             }
 
-            string[] keyArray = keys.ToArray();
-            JObject[] rowArray = rows.ToArray();
-            Array.Sort(keyArray, rowArray, StringComparer.Ordinal);
-
-            int n = rowArray.Length < limit ? rowArray.Length : limit;
-            var a = new JArray();
-            for (int i = 0; i < n; i++) a.Add(rowArray[i]);
-            AddPage(o, a, rowArray.Length, limit);
+            JArray a = SortedPage(keys, rows, limit);
+            AddPage(o, a, rows.Count, limit);
             o["methods"] = a;
             return o;
         }
 
-        static JArray PatchOwners(object patches, FieldInfo kind)
+        static JArray Owners(IEnumerable<Patch> patches)
         {
             var a = new JArray();
-            if (kind == null) return a;
-            IEnumerable list = null;
-            try { list = kind.GetValue(patches) as IEnumerable; }
-            catch (Exception) { }
-            if (list == null) return a;
-            foreach (object patch in list)
+            if (patches == null) return a;
+            foreach (Patch patch in patches)
             {
-                if (patch == null) continue;
-                string id = null;
-                try { id = patchOwnerField.GetValue(patch) as string; }
-                catch (Exception) { }
-                a.Add(new JValue(id));
+                if (patch != null) a.Add(new JValue(patch.owner));
             }
             return a;
         }
