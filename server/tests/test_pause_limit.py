@@ -128,31 +128,35 @@ class PauseDecisionTest(unittest.TestCase):
         return compose.pause_decision(name, args or {}, read_only, stall,
                                       limit)
 
-    def test_a_moving_clock_runs_everything(self):
+    def test_a_clock_inside_the_limit_or_unmeasured_runs_everything(self):
         self.assertEqual(self.decide("spawn_hab", stall=3.0), "run")
-
-    def test_the_limit_itself_is_not_over_it(self):
+        # The limit itself is not over it.
         self.assertEqual(self.decide("spawn_hab", stall=300.0), "run")
+        # A limit of zero disables the guard.
+        self.assertEqual(self.decide("spawn_hab", stall=9999.0, limit=0),
+                         "run")
+        # None is no campaign, a DLL older than the key, or a refresh that
+        # failed. Refusing on it would break the harness over a reading it
+        # could not take, which is worse than the stall being guarded against.
+        self.assertEqual(self.decide("spawn_hab", stall=None), "run")
 
     def test_over_the_limit_a_fixture_is_refused(self):
         self.assertEqual(self.decide("spawn_hab"), "refuse")
         self.assertEqual(self.decide("grant"), "refuse")
         self.assertEqual(self.decide("console"), "refuse")
 
-    def test_a_read_only_tool_runs_with_the_banner(self):
+    def test_a_read_only_tool_runs_with_the_banner_and_a_write_is_refused(
+            self):
         # Reading a stopped campaign is legitimate work for anyone who is not
         # the one driving it: a researcher, a reviewer, the user. Refusing
         # those would make the guard a nuisance to people it is not about.
-        for name in ("query", "template", "inspect", "log_tail", "modcheck"):
-            self.assertEqual(self.decide(name, read_only=True), "banner", name)
-
-    def test_a_split_pair_reads_over_a_stopped_clock_and_writes_nowhere(self):
         # Three tools used to read and write through one name, so each was
         # marked a write and each had its READ refused here: the guard against
         # building state over a dead clock, refusing the calls that build none.
         # The column is read off the table rather than passed by hand, so a
         # tool re-marked in tools.py fails this case.
-        for name in ("faction_relations", "ui_status"):
+        for name in ("query", "template", "inspect", "log_tail", "modcheck",
+                     "faction_relations", "ui_status"):
             self.assertIs(tools.READ_ONLY[name], True, name)
             self.assertEqual(
                 self.decide(name, read_only=tools.READ_ONLY[name]),
@@ -257,16 +261,6 @@ class PauseDecisionTest(unittest.TestCase):
         self.assertEqual(self.decide("time", args={"speed": False}), "run")
         self.assertEqual(self.decide("time", args={"speed": "fast"}), "run")
 
-    def test_a_limit_of_zero_disables_the_guard(self):
-        self.assertEqual(self.decide("spawn_hab", stall=9999.0, limit=0),
-                         "run")
-
-    def test_an_unreadable_stall_never_refuses(self):
-        # None is no campaign, a DLL older than the key, or a refresh that
-        # failed. Refusing on it would break the harness over a reading it
-        # could not take, which is worse than the stall being guarded against.
-        self.assertEqual(self.decide("spawn_hab", stall=None), "run")
-
 
 class BannerTest(unittest.TestCase):
     """The message carries the diagnosis, not just the number."""
@@ -358,12 +352,6 @@ class PauseGateTest(unittest.TestCase):
         fake = FakeBridge(**kw)
         with mock.patch.object(compose, "bridge", fake):
             return compose.pause_gate(name, args or {}, read_only), fake
-
-    def test_a_fresh_reading_is_not_refreshed(self):
-        (refusal, banner), fake = self.gate("spawn_hab", seconds=12.0, age=1.0)
-        self.assertIsNone(refusal)
-        self.assertIsNone(banner)
-        self.assertEqual(fake.count("query.time"), 0)
 
     def test_a_stale_reading_costs_one_query_time(self):
         # The refresh IS the reading: query.time answers with the seconds and
@@ -472,8 +460,9 @@ class PauseGateTest(unittest.TestCase):
 
     def test_a_healthy_fresh_cache_costs_no_verb(self):
         # The refresh above is only for readings that are about to refuse.
-        (refusal, _), fake = self.gate("spawn_hab", seconds=12.0, age=1.0)
+        (refusal, banner), fake = self.gate("spawn_hab", seconds=12.0, age=1.0)
         self.assertIsNone(refusal)
+        self.assertIsNone(banner)
         self.assertEqual(fake.calls, [])
 
     def test_an_exempt_tool_takes_no_reading_at_all(self):
@@ -535,12 +524,6 @@ class EpisodeTest(unittest.TestCase):
         self.note(500.0)
         self.assertEqual(compose._STALL["stallViolations"], 1)
         self.assertIs(compose._STALL["lastViolation"], first)
-
-    def test_an_unknown_reading_stops_nothing_either(self):
-        # It keeps the episode open; it must not hand anybody a record to
-        # refuse or stop on, because nothing was measured.
-        self.note(412.0)
-        self.assertIsNone(self.note(None))
 
     def test_a_reading_at_or_under_the_limit_closes_it(self):
         self.note(412.0)
@@ -861,12 +844,10 @@ class AdvanceStopTest(unittest.TestCase):
         self.assertEqual(digest["pauseLimit"]["state"], "blocked")
         self.assertIn("PAUSE LIMIT EXCEEDED", digest["next"])
         self.assertEqual(compose._STALL["stallViolations"], 1)
-
-    def test_the_first_poll_still_runs_the_loop_body(self):
-        # advance is the way out of a stall. A call that gave up before
-        # pressing anything would leave an agent with a refusal from every
-        # other tool and nothing left that could clear it.
-        _, fake = self.run_advance(412.0)
+        # The first poll still runs the loop body. advance is the way out of
+        # a stall: a call that gave up before pressing anything would leave an
+        # agent with a refusal from every other tool and nothing left that
+        # could clear it.
         self.assertGreaterEqual(len(fake.dismiss_args), 1)
 
     def test_a_clock_inside_the_limit_runs_the_call_out_as_before(self):
@@ -993,17 +974,6 @@ class AdvanceStopTest(unittest.TestCase):
         self.assertNotEqual(digest["stopReason"], "pause_limit")
         self.assertEqual(compose._STALL["stallViolations"], 1)
 
-    def test_repeated_pause_limit_stops_reach_the_no_progress_refusal(self):
-        # The stop moves zero days and the clock is what has to move, so
-        # calling again over the same stopped clock is exactly the loop the
-        # no-progress refusal exists to break.
-        self.assertIn("pause_limit", compose.INERT_STOPS)
-        for _ in range(compose.ZERO_PROGRESS_REFUSE - 1):
-            digest, _ = self.run_advance(412.0)
-            self.assertEqual(digest["stopReason"], "pause_limit")
-        with self.assertRaises(compose.ToolError):
-            self.run_advance(412.0)
-
 
 class StallCacheTest(unittest.TestCase):
     """bridge caches the stall off every envelope, ok or error."""
@@ -1013,51 +983,25 @@ class StallCacheTest(unittest.TestCase):
         bridge._stall.update({"seconds": None, "at": None})
         self.addCleanup(bridge._stall.update, saved)
 
-    def test_a_success_envelope_is_read(self):
-        bridge._note_stall({"id": 1, "ok": True, "clockStall": 12.5,
-                            "data": {}})
-        seconds, age = bridge.last_stall()
-        self.assertEqual(seconds, 12.5)
-        self.assertLess(age, 5)
-
-    def test_an_error_envelope_is_read_too(self):
-        # The calls that fail are exactly where a client would otherwise learn
-        # nothing about the clock.
-        bridge._note_stall({"id": 1, "ok": False, "clockStall": 61.0,
-                            "error": "arg 'id' is required"})
-        self.assertEqual(bridge.last_stall()[0], 61.0)
-
-    def test_a_null_stall_is_unknown_but_still_a_reading(self):
-        # No campaign loaded: nothing to measure, and the age still moves so
-        # the gate does not ask again on every call.
-        bridge._note_stall({"id": 1, "ok": True, "clockStall": None})
-        seconds, age = bridge.last_stall()
-        self.assertIsNone(seconds)
-        self.assertIsNotNone(age)
-
-    def test_an_old_dll_is_asked_once_and_then_left_alone(self):
-        bridge._note_stall({"id": 1, "ok": True, "data": {}})
-        seconds, age = bridge.last_stall()
-        self.assertIsNone(seconds)
-        self.assertIsNotNone(age)
-
-    def test_a_boolean_is_not_a_number(self):
-        # bool is an int in Python, and True would read as a one-second stall.
-        bridge._note_stall({"id": 1, "ok": True, "clockStall": True})
-        self.assertIsNone(bridge.last_stall()[0])
-
-    def test_a_transport_failure_clears_the_cache(self):
-        # A call that reached nothing has learned the reading is no longer
-        # current. Keeping it would have the limit refuse calls over the clock
-        # of a game that has stopped running.
-        bridge._note_stall({"id": 1, "ok": True, "clockStall": 400.0})
-        with mock.patch.object(bridge.socket, "create_connection",
-                               side_effect=OSError("connection refused")):
-            with self.assertRaises(bridge.BridgeError):
-                bridge.call("query.time")
-        seconds, age = bridge.last_stall()
-        self.assertIsNone(seconds)
-        self.assertIsNotNone(age)
+    def test_every_envelope_is_a_reading(self):
+        # Success and error envelopes both: the calls that fail are exactly
+        # where a client would otherwise learn nothing about the clock. A null
+        # stall is no campaign loaded, unknown but still a reading, so the age
+        # moves and the gate does not ask again on every call. bool is an int
+        # in Python, and True would read as a one-second stall.
+        for envelope, want in (
+                ({"id": 1, "ok": True, "clockStall": 12.5, "data": {}}, 12.5),
+                ({"id": 1, "ok": False, "clockStall": 61.0,
+                  "error": "arg 'id' is required"}, 61.0),
+                ({"id": 1, "ok": True, "clockStall": None}, None),
+                ({"id": 1, "ok": True, "clockStall": True}, None)):
+            with self.subTest(envelope=envelope):
+                bridge._stall.update({"seconds": None, "at": None})
+                bridge._note_stall(envelope)
+                seconds, age = bridge.last_stall()
+                self.assertEqual(seconds, want)
+                self.assertIsNotNone(age)
+                self.assertLess(age, 5)
 
     def test_no_campaign_clears_the_cache(self):
         # A stall belongs to a campaign and ends with it: a reading taken

@@ -255,13 +255,9 @@ class ModcheckTestCase(unittest.TestCase):
     """A fixture install in a tmpdir, with every modcheck path global pointed
     at it and every module-level cache reset around the case."""
 
-    # Every modcheck global that resolves to a path in the game install.
-    PATCHED = ("ROOT", "VANILLA_DIR", "DLC_DIR", "MODS_ENABLED",
-               "MODS_DISABLED", "BASELINE_PATH", "ENUM_CACHE_PATH",
-               "SAVES_DIR")
-
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="ti-modcheck-")
+        # Every modcheck global that resolves to a path in the game install.
         paths = {
             "ROOT": self.root,
             # _class_is_localized and _vanilla_loc_keys rebuild this path from
@@ -283,7 +279,7 @@ class ModcheckTestCase(unittest.TestCase):
             self.addCleanup(patcher.stop)
         # No individual case can catch an unpatched ROOT: it reads the real
         # install, suppresses the finding the case is about, and passes.
-        for name in self.PATCHED:
+        for name in paths:
             value = getattr(modcheck, name)
             self.assertTrue(value.startswith(self.root),
                             "%s escaped the fixture tree: %s" % (name, value))
@@ -308,13 +304,10 @@ class ModcheckTestCase(unittest.TestCase):
 
     # -------------------------------------------------------------- fixtures
 
-    def vanilla_path(self, filename):
-        return os.path.join(modcheck.VANILLA_DIR, filename)
-
     def write_vanilla(self, filename, entries):
         """Replace one vanilla template file. Call before running a check: the
         parsed result is cached by filename for the rest of the case."""
-        write_json(self.vanilla_path(filename), entries)
+        write_json(os.path.join(modcheck.VANILLA_DIR, filename), entries)
         modcheck._VANILLA_CACHE.clear()
 
     def write_enum_cache(self, payload=None):

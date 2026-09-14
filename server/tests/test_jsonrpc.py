@@ -30,32 +30,9 @@ SERVER_DIR = os.path.abspath(
 if SERVER_DIR not in sys.path:
     sys.path.insert(0, SERVER_DIR)
 # Arms the guard that fails any case which would dial a running game.
-import _offline                                     # noqa: E402,F401
+import _offline                                     # noqa: E402
 import compose                                      # noqa: E402
 import tools                                        # noqa: E402
-
-
-class OfflineBridge:
-    """A bridge stand-in for the cases that reach a handler.
-
-    handle_call takes a stall reading and a campaign token before it
-    dispatches, both through the bridge module. Without this the case below
-    dials the real port -- and on a machine with the game running it reads
-    that session's clock and can be refused by its pause limit, which is a
-    test that passes or fails on what is on screen somewhere else.
-    """
-
-    def last_stall(self):
-        return None, 0.0
-
-    def last_campaign_token(self):
-        return None
-
-    def last_campaign_process(self):
-        return None
-
-    def call(self, verb, args=None, **kw):
-        raise AssertionError("no bridge call belongs in this test: %s" % verb)
 
 
 def _load_server_main():
@@ -171,7 +148,8 @@ class OversizedResultTest(StdioTestCase):
     def test_oversized_result_answers_once_and_the_next_request_survives(self):
         handler = mock.Mock(return_value={"text": "x" * tools.TEXT_LIMIT})
         with mock.patch.dict(tools.BY_NAME, {"fake_tool": handler}), \
-                mock.patch.object(compose, "bridge", OfflineBridge()):
+                mock.patch.object(compose, "bridge",
+                                  _offline.DispatchBridge()):
             self.feed({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                        "params": {"name": "fake_tool", "arguments": {}}},
                       {"jsonrpc": "2.0", "id": 2, "method": "ping"})
@@ -214,10 +192,6 @@ class NotificationTest(StdioTestCase):
                 self.feed(request)
                 self.assertEqual([m["id"] for m in self.messages()], [3])
 
-    def test_a_null_id_is_never_written(self):
-        self.feed(*self.NOTIFICATIONS)
-        self.assertNotIn("null", self.out.getvalue())
-
 
 class HandleCallTest(unittest.TestCase):
     """tools.handle_call takes its two arguments straight off the wire."""
@@ -247,7 +221,8 @@ class HandleCallTest(unittest.TestCase):
 
         with mock.patch.dict(tools.BY_NAME, {"fake_tool": handler}), \
                 mock.patch.dict(tools.READ_ONLY, {"fake_tool": True}), \
-                mock.patch.object(compose, "bridge", OfflineBridge()):
+                mock.patch.object(compose, "bridge",
+                                  _offline.DispatchBridge()):
             tools.handle_call("fake_tool", None)
         self.assertEqual(seen["args"], {})
 

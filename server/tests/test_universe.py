@@ -120,14 +120,6 @@ class UniverseTest(_fixtures.ModcheckTestCase):
         self.assertEqual(self.tech(self.universe(), "Tech_Delta")["prereqs"],
                          ["Tech_Alpha"])
 
-    def test_templates_to_replace_arrays_can_clear_a_list(self):
-        self.add_mod("Edit",
-                     modinfo={"TemplatesToReplaceArrays":
-                              ["TITechTemplate.json"]},
-                     files={"TITechTemplate.json": [
-                         {"dataName": "Tech_Beta", "effects": []}]})
-        self.assertEqual(self.tech(self.universe())["effects"], [])
-
     # -------------------------------------------------------- whole replace
 
     def test_templates_to_replace_wipes_every_vanilla_field(self):

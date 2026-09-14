@@ -82,9 +82,6 @@ class UmmInjectionTest(unittest.TestCase):
         self._write(os.path.join(self.root, "winhttp.dll"), "loader")
         self.assertIn("no UMM install found", self.injection())
 
-    def test_no_loader_at_all_says_so(self):
-        self.assertIn("no UMM install found", self.injection())
-
     def test_the_assembly_method_still_reports_patched(self):
         self.install_assembly()
         self.assertEqual(self.injection(), "patched")

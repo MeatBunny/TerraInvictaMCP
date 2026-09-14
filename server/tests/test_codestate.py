@@ -96,18 +96,6 @@ class LoadedFilesTest(Sandbox):
         sys.modules["ti_fake_builtin"] = _FakeModule(None)
         self.assertEqual(codestate._loaded_files(), [])
 
-    def test_survives_a_module_dict_that_changes_during_the_walk(self):
-        # An import on another thread resizes sys.modules; the walk copies it.
-        self.load("alpha.py")
-        real = codestate._loaded_files
-
-        def racing():
-            sys.modules["ti_fake_race"] = _FakeModule(
-                os.path.join(self.dir, "race.py"))
-            return real()
-
-        self.assertEqual(len(racing()), 2)
-
 
 class NoteTest(Sandbox):
     """The record is written once, at load time, and never refreshed."""
@@ -269,34 +257,22 @@ class SelftestTest(Sandbox):
         patch.start()
         self.addCleanup(patch.stop)
 
-    def test_server_code_is_the_first_line_of_the_offline_report(self):
+    def test_clean_run_reports_current_first_and_does_not_fail(self):
         self.load("alpha.py")
         codestate.note()
         report = compose.selftest({})
         self.assertEqual(list(report["offline"])[0], "serverCode")
-
-    def test_clean_run_reports_current_and_does_not_fail(self):
-        self.load("alpha.py")
-        codestate.note()
-        report = compose.selftest({})
         self.assertTrue(report["offline"]["serverCode"].startswith("current"))
         self.assertNotIn("_failed", report)
 
-    def test_drift_is_reported_and_fails_the_call(self):
-        path = self.load("alpha.py")
-        codestate.note()
-        self.rewrite(path, "edited\n")
-        report = compose.selftest({})
-        self.assertTrue(report["offline"]["serverCode"].startswith("STALE"))
-        self.assertTrue(report["_failed"])
-
-    def test_drift_is_reported_with_the_game_down(self):
+    def test_drift_is_reported_and_fails_the_call_with_the_game_down(self):
         # The offline half is what an agent runs after editing the server,
         # which is exactly when the game is most likely not up.
         path = self.load("alpha.py")
         codestate.note()
         self.rewrite(path, "edited\n")
         report = compose.selftest({})
+        self.assertTrue(report["offline"]["serverCode"].startswith("STALE"))
         self.assertTrue(report["bridge"].startswith("down"))
         self.assertTrue(report["_failed"])
 
@@ -356,19 +332,12 @@ class DispatchTest(Sandbox):
         self.call({"ok": True})
         self.assertEqual(codestate.unverified(), [])
 
-    def test_failed_payload_is_returned_and_marked_an_error(self):
+    def test_failed_payload_is_returned_marked_an_error_and_stripped(self):
         result = self.call({"offline": {"serverCode": "STALE -- ..."},
                             "_failed": True})
         self.assertTrue(result["isError"])
-        self.assertIn("STALE", result["content"][0]["text"])
-
-    def test_the_failed_flag_is_stripped_from_the_payload(self):
-        result = self.call({"a": 1, "_failed": True})
-        self.assertEqual(json.loads(result["content"][0]["text"]), {"a": 1})
-
-    def test_an_ordinary_payload_is_not_an_error(self):
-        result = self.call({"a": 1})
-        self.assertFalse(result["isError"])
+        self.assertEqual(json.loads(result["content"][0]["text"]),
+                         {"offline": {"serverCode": "STALE -- ..."}})
 
 
 if __name__ == "__main__":

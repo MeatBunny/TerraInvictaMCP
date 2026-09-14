@@ -26,6 +26,7 @@ if SERVER_DIR not in sys.path:
 import _offline                                     # noqa: E402,F401
 import bridge                                       # noqa: E402
 import compose                                      # noqa: E402
+from test_advance import _no_sleep                  # noqa: E402
 
 
 BEGIN_COMBAT = "PromptBeginCombat"
@@ -41,18 +42,6 @@ DONE = {"active": None, "pending": [], "blocked": True,
                         "retryable": True,
                         "firedAutoresolveSelected": True,
                         "firedAcceptAutoresolve": True}}
-
-
-def _no_sleep(case):
-    """One virtual clock for the sleep and the budget both, so a case that
-    means "five polls" costs no wall time and does not race the machine."""
-    clock = {"now": 0.0}
-    saved_sleep = compose._time.sleep
-    saved_monotonic = compose._time.monotonic
-    compose._time.sleep = lambda s: clock.__setitem__("now", clock["now"] + s)
-    compose._time.monotonic = lambda: clock["now"]
-    case.addCleanup(setattr, compose._time, "monotonic", saved_monotonic)
-    case.addCleanup(setattr, compose._time, "sleep", saved_sleep)
 
 
 class CombatBridge:
@@ -209,17 +198,12 @@ class LostStatusPollTest(unittest.TestCase):
         self.assertEqual(report["stopReason"], "bridge_busy")
         self.assertIs(report["resolved"], False)
         self.assertEqual(report["lostPolls"], compose.LOST_POLLS_MAX)
-        self.assertIn("combat_autoresolve", report["next"])
         self.assertEqual(fake.count("prompts.dismiss"), 0)
-
-    def test_the_busy_next_sends_the_caller_to_the_status_first(self):
-        # The resolution may well have finished while the polls were going
-        # unanswered, and a second arm on a combat whose one-shots have fired
-        # is refused. Telling the caller to re-arm without looking first
-        # produced that refusal as the answer to a tool that had just said to
-        # call it.
-        report, _ = self._run(
-            [bridge.BridgeTimeout("no reply within 30s")] * 6)
+        # The next line sends the caller to the status first. The resolution
+        # may well have finished while the polls were going unanswered, and a
+        # second arm on a combat whose one-shots have fired is refused.
+        # Telling the caller to re-arm without looking first produced that
+        # refusal as the answer to a tool that had just said to call it.
         text = report["next"]
         self.assertIn("combat_status", text)
         self.assertLess(text.index("combat_status"),

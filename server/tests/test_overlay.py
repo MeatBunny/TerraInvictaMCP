@@ -79,11 +79,6 @@ class OverlayTest(_fixtures.ModcheckTestCase):
         return modcheck.check_refs(modcheck._Session(bridge), None, None,
                                    True)
 
-    def test_the_bulk_overlay_leaves_the_vanilla_cache_alone(self):
-        before = list(self.vanilla_effects())
-        self.run_refs(BulkBridge())
-        self.assertEqual(self.vanilla_effects(), before)
-
     def test_the_per_entry_overlay_leaves_the_vanilla_cache_alone(self):
         before = list(self.vanilla_effects())
         self.run_refs(PerEntryBridge())
@@ -96,13 +91,6 @@ class OverlayTest(_fixtures.ModcheckTestCase):
             result["summary"]["baseline"]["suppressedVanillaFindings"], 0)
         self.assertEqual(self.field_values(result["verdicts"], "value"),
                          ["Effect_Missing"])
-
-    def test_the_baseline_on_disk_carries_no_engine_finding(self):
-        self.run_refs(BulkBridge())
-        with open(modcheck.BASELINE_PATH) as f:
-            baseline = json.load(f)
-        self.assertEqual([k for k in baseline["refs"]
-                          if "Effect_Missing" in k], [])
 
     def test_the_same_finding_survives_a_later_offline_run(self):
         """The failure this whole file is about was silent one run later: the

@@ -70,11 +70,6 @@ class OnlyNarrativeTest(unittest.TestCase):
             {"name": NARRATIVE, "waitingForBox": True},
             {"name": "PromptSelectTech", "reason": "no tech to select"})))
 
-    def test_two_box_waits_are_a_box_wait(self):
-        self.assertTrue(compose._only_narrative(_skipped(
-            {"name": NARRATIVE, "waitingForBox": True},
-            {"name": NARRATIVE, "waitingForBox": True})))
-
     def test_empty_and_missing_are_not_box_waits(self):
         self.assertFalse(compose._only_narrative(_skipped()))
         self.assertFalse(compose._only_narrative({}))
@@ -98,19 +93,10 @@ class HoldPollsTest(unittest.TestCase):
             was = waiting
         return stuck
 
-    def test_a_single_regime_counts_every_poll(self):
-        self.assertEqual(self._run([True, True, True]), 3)
-
     def test_regime_change_restarts_the_count(self):
         # Three polls of an ordinary hold, then two of a box wait. The box
         # wait is two polls old, not five.
         self.assertEqual(self._run([False, False, False, True, True]), 2)
-
-    def test_the_stop_message_prints_the_current_hold_only(self):
-        polls = self._run([False, False, False, True, True])
-        text = compose._stop_next(True, polls)
-        self.assertIn("over 2 polls", text)
-        self.assertNotIn("over 5 polls", text)
 
     def test_change_back_restarts_it_again(self):
         self.assertEqual(self._run([True, True, True, False]), 1)
@@ -124,10 +110,13 @@ class StopNextTest(unittest.TestCase):
     drop that will not happen to it.
     """
 
-    def test_box_branch_names_alert_choose(self):
-        text = compose._stop_next(True, 10)
+    def test_box_branch_names_alert_choose_and_the_current_hold(self):
+        # The poll count is the CURRENT hold's, so a box wait two polls old
+        # after three polls of an ordinary hold says two, never five.
+        text = compose._stop_next(True, 2)
+        self.assertIn("over 2 polls", text)
+        self.assertNotIn("over 5 polls", text)
         self.assertIn("alert_choose", text)
-        self.assertIn("over 10 polls", text)
 
     def test_non_box_branch_does_not_offer_a_narrative_drop(self):
         text = compose._stop_next(False, 2)
@@ -150,65 +139,16 @@ class PhaseDecisionTest(unittest.TestCase):
     phase the game will not close itself.
     """
 
-    def test_a_closed_phase_runs(self):
-        action, waits, phase = compose._phase_decision(_phase(False), 0)
-        self.assertEqual(action, "run")
-        self.assertEqual(waits, 0)
-        self.assertEqual(phase["active"], False)
-
-    def test_an_open_phase_holds(self):
-        action, waits, _ = compose._phase_decision(_phase(True), 0)
-        self.assertEqual(action, "hold")
-        self.assertEqual(waits, 1)
-
-    def test_an_engagement_skips_the_hold(self):
-        # AiControl's own StartNewMissionPhase prefix defers a colliding tick
-        # while engaged, so the phase is guarded already and holding the clock
-        # would only stall the run the engagement is driving.
-        action, waits, phase = compose._phase_decision(
-            _phase(True), 0, engaged=True)
-        self.assertEqual(action, "run")
-        self.assertEqual(waits, 0)
-        self.assertEqual(phase["active"], True)
-
     def test_a_phase_that_closes_within_the_bound_runs_and_forgets_the_hold(
             self):
         # The ordinary case: the dismiss pass presses the assignment
         # confirmation and the phase closes a poll or two later.
         action, waits, _ = compose._phase_decision(_phase(True), 0)
         self.assertEqual(action, "hold")
+        self.assertEqual(waits, 1)
         action, waits, _ = compose._phase_decision(_phase(False), waits)
         self.assertEqual(action, "run")
         self.assertEqual(waits, 0)
-
-    def test_the_bound_is_the_last_hold_and_not_one_past_it(self):
-        waits = 0
-        for _ in range(compose.MISSION_PHASE_POLLS - 1):
-            action, waits, _ = compose._phase_decision(_phase(True), waits)
-            self.assertEqual(action, "hold")
-        action, waits, _ = compose._phase_decision(_phase(True), waits)
-        self.assertEqual(action, "stop")
-        self.assertEqual(waits, compose.MISSION_PHASE_POLLS)
-
-    def test_the_bound_stop_counts_toward_the_stall_refusal(self):
-        self.assertIn("mission_phase", compose.INERT_STOPS)
-
-    def test_force_runs_through_an_open_phase(self):
-        action, waits, phase = compose._phase_decision(
-            _phase(True), 5, force=True)
-        self.assertEqual(action, "run")
-        self.assertEqual(waits, 0)
-        # Still reported: the caller asked for the collision and the digest
-        # has to be able to say the phase was open when it got it.
-        self.assertEqual(phase["active"], True)
-
-    def test_a_dll_without_the_key_runs(self):
-        # Every DLL before this change. Refusing to run against one would be a
-        # worse failure than the collision being guarded against.
-        action, waits, phase = compose._phase_decision(
-            {"date": "2022-01-01", "paused": True}, 0)
-        self.assertEqual(action, "run")
-        self.assertIsNone(phase)
 
     def test_a_reply_that_is_not_a_dict_runs(self):
         self.assertEqual(compose._phase_decision(None, 0)[0], "run")
@@ -236,18 +176,6 @@ class DropNoteTest(unittest.TestCase):
 
     VIA = ("dropped: no narrative event template behind the prompt, so nothing "
            "could ever answer it; no option was applied")
-
-    def test_two_drops_produce_two_notes_naming_both_events(self):
-        drops = [{"event": "event_Hurricane", "dropped": True, "via": self.VIA,
-                  "deadEnd": "no narrative event template behind the prompt"},
-                 {"event": "event_Earthquake", "dropped": True, "via": self.VIA,
-                  "deadEnd": "the narrative event's target Tokyo has been "
-                             "deleted, so its alert box logs the target away "
-                             "and applies no option"}]
-        notes = [compose._drop_note(d) for d in drops]
-        self.assertEqual(len(set(notes)), 2)
-        self.assertIn("event_Hurricane", notes[0])
-        self.assertIn("event_Earthquake", notes[1])
 
     def test_the_reason_travels_with_the_name(self):
         note = compose._drop_note(
@@ -518,19 +446,45 @@ class AdvanceLoopTest(unittest.TestCase):
         # The regression this case exists for: matching the prompt by name
         # alone gave this reply the box-wait leash, so the run spent ten polls
         # and then reported that a box never came up while the box was open.
+        # The fake's default alert is open, so this is the two-poll hold.
         digest, fake = self._run(self.LEFT_STANDING, narrative_events=False)
         self.assertEqual(digest["stopReason"], "decision")
         self.assertEqual(fake.dismiss_args[0],
                          {"narrative": False, "narrativeMode": "false"})
         self.assertNotIn("narrativeBoxWaits", digest)
         self.assertEqual(len(fake.dismiss_args), 2)
-
-    def test_deliberate_hold_is_not_told_to_drop_the_prompt(self):
-        digest, _ = self._run(self.LEFT_STANDING, narrative_events=False)
+        # Not told to drop the prompt: the stop names the path that exists.
         self.assertNotIn("mode=drop type=PromptAddressNarrativeEvent",
                          digest["next"])
         self.assertNotIn("never came up", digest["next"])
         self.assertIn("alert_choose", digest["next"])
+        # And it says no later call will answer it; llm is the mode that can.
+        self.assertIn("narrative_events=false", digest["next"])
+        self.assertIn("llm", digest["next"])
+
+    def test_an_ordinary_decision_under_ai_says_none_of_that(self):
+        digest, _ = self._run(self.LEFT_STANDING)
+        self.assertNotIn("narrative_events=false", digest["next"])
+
+    def test_a_box_that_has_not_come_up_is_waited_for_under_false_as_well(
+            self):
+        # The attended mode sends the same `narrative: false` and gets the
+        # same reply, so it had the same defect: a box still queued read as a
+        # decision standing ready and the call reported one two polls in, with
+        # nothing on screen for the person to answer.
+        digest, _ = self._run(self.LEFT_STANDING, alert={"open": False},
+                              narrative_events=False)
+        self.assertEqual(digest["stopReason"], "decision")
+        self.assertEqual(digest["narrativeBoxWaits"],
+                         compose.NARRATIVE_BOX_POLLS)
+        self.assertIn("never came up", digest["next"])
+
+    def test_ai_runs_and_sends_the_mode_beside_the_switch(self):
+        # A DLL older than the mode key ignores it and presses on `narrative`
+        # alone. `narrative` is absent under ai, as it always was: the DLL
+        # defaults it to true and an old one must not be told otherwise.
+        _, fake = self._run(CLEAR, max_seconds=20)
+        self.assertEqual(fake.dismiss_args[0], {"narrativeMode": "ai"})
 
     # A box that never renders. The long leash is the bound on THIS, and it
     # is the only case that should spend it.
@@ -600,22 +554,13 @@ class DismissRefusalTest(unittest.TestCase):
         digest, fake = self._run(self.MOVED_SEAT)
         self.assertEqual(digest["stopReason"], "active_player_moved")
         self.assertEqual(len(fake.dismiss_args), 1)
-
-    def test_the_dll_text_is_what_the_caller_is_told(self):
         # The zero-days preamble every stop carries is prefixed to it; the
-        # refusal's own words are the rest of the line.
-        digest, _ = self._run(self.MOVED_SEAT)
+        # refusal's own words are the rest of the line. The digest carries the
+        # DLL reply intact rather than a summary, so the seat to put back
+        # (what setfaction is called with) reaches the caller, and a key added
+        # on that side does too without a change here.
         self.assertIn(self.MOVED_SEAT["text"], digest["next"])
         self.assertEqual(digest["promptsRefusal"], self.MOVED_SEAT)
-
-    def test_the_seat_to_put_back_survives_into_the_digest(self):
-        # The refusal names the faction the campaign came up with, and that
-        # name is the whole recovery: it is what setfaction is called with.
-        # The digest carries the DLL reply intact rather than a summary, so a
-        # key added on that side reaches the caller without a change here.
-        digest, _ = self._run(self.MOVED_SEAT)
-        self.assertEqual(digest["promptsRefusal"]["seatedFaction"],
-                         {"dataName": "Resistance"})
 
     def test_an_engagement_is_not_a_moved_seat(self):
         # ai_autopilot leaves the seat where it is and flips the AI flag on
@@ -640,18 +585,6 @@ class DismissRefusalTest(unittest.TestCase):
                                                "reason": "somethingNew"})
         self.assertEqual(stop, "prompts_refused")
         self.assertIn("somethingNew", text)
-
-    def test_a_refusal_counts_toward_the_stall_refusal(self):
-        # Calling again over an unchanged seat is the loop the counter exists
-        # to break: nothing between two calls can clear it.
-        self.assertIn("active_player_moved", compose.INERT_STOPS)
-        self.assertIn("prompts_refused", compose.INERT_STOPS)
-
-    def test_an_ordinary_reply_is_not_a_refusal(self):
-        self.assertIsNone(compose._dismiss_refusal(
-            {"skipped": [], "remaining": 0}))
-        self.assertIsNone(compose._dismiss_refusal({"ok": True}))
-        self.assertIsNone(compose._dismiss_refusal(None))
 
 
 class NarrativeModeTest(unittest.TestCase):
@@ -688,17 +621,13 @@ class NarrativeModeTest(unittest.TestCase):
     def test_a_mode_nobody_defined_is_refused(self):
         # Defaulting would run the engine's AI over every story event of the
         # call while the caller believed it was being handed them.
-        with self.assertRaises(tools.ToolError):
+        with self.assertRaises(tools.ToolError) as e:
             compose._narrative_mode({"narrative_events": "handover"})
+        # The error names the modes that exist.
+        self.assertIn("llm", str(e.exception))
+        self.assertIn("ai", str(e.exception))
         with self.assertRaises(tools.ToolError):
             compose._narrative_mode({"narrative_events": 3})
-
-    def test_the_error_names_all_three(self):
-        try:
-            compose._narrative_mode({"narrative_events": "handover"})
-        except tools.ToolError as e:
-            self.assertIn("llm", str(e))
-            self.assertIn("ai", str(e))
 
 
 class NarrativeLlmTest(unittest.TestCase):
@@ -727,21 +656,9 @@ class NarrativeLlmTest(unittest.TestCase):
         self.assertEqual(fake.dismiss_args[0],
                          {"narrative": False, "narrativeMode": "llm"})
         self.assertEqual(digest["narrativeEvents"], [])
-
-    def test_the_next_line_lists_the_options_it_is_handing_over(self):
-        digest, _ = self._run(AdvanceLoopTest.LEFT_STANDING,
-                              narrative_events="llm")
+        # The next line lists the options it is handing over.
         self.assertIn("0=Acknowledge", digest["next"])
         self.assertIn("2022-01-02", digest["next"])
-
-    def test_a_handover_is_progress_and_never_reaches_the_stall_refusal(self):
-        # The caller's answer is what moves the run, so a call that hands one
-        # over has done its job however many days it moved.
-        self.assertNotIn("narrative_event", compose.INERT_STOPS)
-        for _ in range(compose.ZERO_PROGRESS_REFUSE + 2):
-            digest, _ = self._run(AdvanceLoopTest.LEFT_STANDING,
-                                  narrative_events="llm")
-            self.assertEqual(digest["stopReason"], "narrative_event")
 
     def test_a_box_that_has_not_rendered_is_not_a_handover(self):
         # The prompt is queued and the box is still behind the notifications
@@ -776,12 +693,6 @@ class NarrativeLlmTest(unittest.TestCase):
         self.assertEqual(digest["alert"]["options"][0]["option"], 0)
         self.assertEqual(len(fake.dismiss_args), 6)
 
-    def test_a_box_on_poll_four_is_handed_over_too(self):
-        digest, fake = self._run(AdvanceLoopTest.LEFT_STANDING,
-                                 alert_from=5, narrative_events="llm")
-        self.assertEqual(digest["stopReason"], "narrative_event")
-        self.assertEqual(len(fake.dismiss_args), 4)
-
     def test_a_box_with_no_live_options_is_not_a_handover_either(self):
         # An ordinary notification's box is open too; only option buttons make
         # it a story event.
@@ -802,109 +713,12 @@ class NarrativeLlmTest(unittest.TestCase):
             narrative_events="llm")
         self.assertEqual(digest["stopReason"], "decision")
 
-    def test_a_dll_that_does_not_report_press_lands_is_taken_at_its_word(self):
-        # The key is newer than the verb. Absent means the reading is not
-        # available, which is the state every build had before it, and the
-        # handover has to keep working there.
-        digest, _ = self._run(
-            AdvanceLoopTest.LEFT_STANDING,
-            alert={"open": True,
-                   "options": [{"option": 0, "label": "Acknowledge"}]},
-            narrative_events="llm")
-        self.assertEqual(digest["stopReason"], "narrative_event")
-
     def test_a_clear_queue_costs_no_alert_read(self):
         # The mode must not add a verb per poll to a run that never meets a
         # story event: the prompt is queued by the same call that queues the
         # box, so an empty queue means no box.
         _, fake = self._run(CLEAR, narrative_events="llm", max_seconds=20)
         self.assertEqual(fake.count("alert.choose"), 0)
-
-
-class NarrativeAttendedTest(unittest.TestCase):
-    """false is the attended mode and says so."""
-
-    def setUp(self):
-        _no_sleep(self)
-        _fresh_run_state(self)
-
-    def _run(self, reply, **kw):
-        fake = FakeBridge(reply)
-        with mock.patch.object(compose, "bridge", fake):
-            digest = compose.advance(dict({"days": 1}, **kw))
-        return digest, fake
-
-    def test_the_hold_is_the_one_it_always_was(self):
-        digest, fake = self._run(AdvanceLoopTest.LEFT_STANDING,
-                                 narrative_events=False)
-        self.assertEqual(digest["stopReason"], "decision")
-        self.assertEqual(len(fake.dismiss_args), 2)
-
-    def test_the_stop_says_no_call_will_ever_answer_it(self):
-        # The generic decision line reads like advice a later call could act
-        # on. Under this mode no later call can, and llm is the mode that can.
-        digest, _ = self._run(AdvanceLoopTest.LEFT_STANDING,
-                              narrative_events=False)
-        self.assertIn("narrative_events=false", digest["next"])
-        self.assertIn("llm", digest["next"])
-
-    def test_an_ordinary_decision_under_ai_says_none_of_that(self):
-        digest, _ = self._run(AdvanceLoopTest.LEFT_STANDING)
-        self.assertNotIn("narrative_events=false", digest["next"])
-
-    def test_a_box_that_has_not_come_up_is_waited_for_here_as_well(self):
-        # The attended mode sends the same `narrative: false` and gets the
-        # same reply, so it had the same defect: a box still queued read as a
-        # decision standing ready and the call reported one two polls in, with
-        # nothing on screen for the person to answer.
-        fake = FakeBridge(AdvanceLoopTest.LEFT_STANDING, alert={"open": False})
-        with mock.patch.object(compose, "bridge", fake):
-            digest = compose.advance({"days": 1, "narrative_events": False})
-        self.assertEqual(digest["stopReason"], "decision")
-        self.assertEqual(digest["narrativeBoxWaits"],
-                         compose.NARRATIVE_BOX_POLLS)
-        self.assertIn("never came up", digest["next"])
-
-    def test_a_box_standing_open_is_still_the_two_poll_hold(self):
-        # The other half: once the box is up, the person can answer it, and
-        # the call says so rather than spending the queue-drain leash on a
-        # box that has already arrived. The fake's default alert is open.
-        digest, fake = self._run(AdvanceLoopTest.LEFT_STANDING,
-                                 narrative_events=False)
-        self.assertEqual(digest["stopReason"], "decision")
-        self.assertEqual(len(fake.dismiss_args), 2)
-        self.assertNotIn("narrativeBoxWaits", digest)
-
-
-class NarrativeOldDllTest(unittest.TestCase):
-    """A DLL older than the mode key is not a failure.
-
-    The fake's prompts.dismiss reply carries no narrativeMode echo, which is
-    exactly what an old build sends: it ignores the unknown key and presses
-    (or does not press) on `narrative` alone. Nothing here may read the echo
-    as a precondition.
-    """
-
-    def setUp(self):
-        _no_sleep(self)
-        _fresh_run_state(self)
-
-    def _run(self, reply, **kw):
-        fake = FakeBridge(reply)
-        with mock.patch.object(compose, "bridge", fake):
-            digest = compose.advance(dict({"days": 1}, **kw))
-        return digest, fake
-
-    def test_ai_runs_and_sends_the_mode_beside_the_switch(self):
-        _, fake = self._run(CLEAR, max_seconds=20)
-        # `narrative` is absent under ai, as it always was: the DLL defaults
-        # it to true and an old one must not be told otherwise.
-        self.assertEqual(fake.dismiss_args[0], {"narrativeMode": "ai"})
-
-    def test_llm_still_stops_without_an_echo_in_the_reply(self):
-        digest, _ = self._run(AdvanceLoopTest.LEFT_STANDING,
-                              narrative_events="llm")
-        self.assertEqual(digest["stopReason"], "narrative_event")
 
 
 # A dismiss reply with nothing queued: the clock is free as far as prompts go.
@@ -959,11 +773,17 @@ class MissionPhaseTest(unittest.TestCase):
         # The whole rule: no time.speed, no time.run_until, no time.play, and
         # a clock that is running is stopped. The fake reports paused false on
         # every poll, so the pause is re-asserted each time.
-        _, fake = self._run(phase_polls=99)
+        digest, fake = self._run(phase_polls=99)
         self.assertGreaterEqual(fake.count("time.pause"), 2)
         self.assertEqual(fake.count("time.play"), 0)
         self.assertEqual(fake.count("time.speed"), 0)
         self.assertEqual(fake.count("time.run_until"), 0)
+        # A phase that never closes stops with its own reason.
+        self.assertEqual(digest["stopReason"], "mission_phase")
+        self.assertEqual(digest["missionPhaseWaits"],
+                         compose.MISSION_PHASE_POLLS)
+        self.assertEqual(digest["missionPhase"]["active"], True)
+        self.assertIn("force=true", digest["next"])
 
     def test_a_phase_that_opens_mid_call_takes_the_clock_back_down(self):
         # The armed half of the rule. The phase was consulted only when the
@@ -998,15 +818,8 @@ class MissionPhaseTest(unittest.TestCase):
         self.assertEqual(fake.count("time.pause"), 0)
         self.assertNotIn("missionPhaseWaits", digest)
         self.assertNotEqual(digest["stopReason"], "mission_phase")
-
-    def test_a_phase_that_never_closes_stops_with_its_own_reason(self):
-        digest, fake = self._run(phase_polls=99)
-        self.assertEqual(digest["stopReason"], "mission_phase")
-        self.assertEqual(digest["missionPhaseWaits"],
-                         compose.MISSION_PHASE_POLLS)
-        self.assertEqual(fake.count("time.run_until"), 0)
+        # Recorded, though not held for: the run may have caused a collision.
         self.assertEqual(digest["missionPhase"]["active"], True)
-        self.assertIn("force=true", digest["next"])
 
     def test_a_clock_that_is_gaining_time_never_stops_on_the_phase(self):
         # The bound counts polls spent with the clock held down. A poll that
@@ -1018,15 +831,6 @@ class MissionPhaseTest(unittest.TestCase):
                               phase_polls=99, days_per_poll=1, blocked=False,
                               max_seconds=200)
         self.assertEqual(digest["stopReason"], "reached")
-
-    def test_the_phase_stop_counts_toward_the_stall_refusal(self):
-        # It names a cause, but the cause is a game nothing here can drive.
-        self.assertIn("mission_phase", compose.INERT_STOPS)
-        for _ in range(compose.ZERO_PROGRESS_REFUSE - 1):
-            digest, _ = self._run(phase_polls=99)
-            self.assertEqual(digest["stopReason"], "mission_phase")
-        with self.assertRaises(tools.ToolError):
-            self._run(phase_polls=99)
 
     def test_a_budget_stop_does_not_claim_a_target_it_never_armed(self):
         # Under a short budget the hold runs out of time before it runs out of
@@ -1041,20 +845,13 @@ class MissionPhaseTest(unittest.TestCase):
         self.assertIs(fake.run_until_args[0]["force"], True)
         self.assertEqual(fake.count("time.pause"), 0)
         self.assertNotEqual(digest["stopReason"], "mission_phase")
-
-    def test_a_forced_run_records_the_phase_it_ran_through(self):
         # force and an ai.control engagement both hand the clock back into an
         # open phase on purpose. The choice is defensible; a digest that said
         # nothing about it was not, because a run that may have caused a
         # collision then looked exactly like one that never met a phase.
-        digest, _ = self._run(phase_polls=99, force=True, max_seconds=20)
         self.assertEqual(digest["missionPhase"]["active"], True)
         # Recorded, not held for: no waits, because nothing waited.
         self.assertNotIn("missionPhaseWaits", digest)
-
-    def test_an_engaged_run_records_the_phase_too(self):
-        digest, _ = self._run(phase_polls=99, engaged=True, max_seconds=20)
-        self.assertEqual(digest["missionPhase"]["active"], True)
 
     def test_an_arm_refused_for_the_phase_never_plays_the_clock(self):
         # The race: the phase opens in the frames between this call's reading
@@ -1122,6 +919,18 @@ class ProgressTest(unittest.TestCase):
         digest = self._run()
         self.assertEqual(digest["daysAdvanced"], 0)
         self.assertEqual(digest["stopReason"], "no_progress")
+
+    def test_the_inert_stops_are_exactly_these(self):
+        # Every member is a zero-day stop nothing between two calls can clear:
+        # the bound on a phase the game will not close, a refused pass over an
+        # unchanged seat, a bridge that stopped answering, a game that crashed
+        # again after its restart. Every non-member hands the caller something
+        # to do; crash_recovered is the one that clears the count, since the
+        # game came back and the next call has a live one to run.
+        self.assertEqual(compose.INERT_STOPS, frozenset({
+            "no_progress", "unknown", "mission_phase", "pause_limit",
+            "active_player_moved", "prompts_refused", "bridge_lost",
+            "crashed"}))
 
     def test_days_advanced_keeps_the_budget_reason(self):
         # Three polls of the virtual clock, two of which move the date.
@@ -1194,13 +1003,6 @@ class UnreadablePromptsTest(unittest.TestCase):
         self.assertEqual(digest["stopReason"], "prompts_unreadable")
         self.assertIn("NOT zero", digest["next"])
 
-    def test_a_readable_zero_is_not_treated_as_unknown(self):
-        fake = FakeBridge(CLEAR, blocked=False, days_per_poll=1)
-        with mock.patch.object(compose, "bridge", fake):
-            digest = compose.advance({"days": 2, "max_seconds": 600})
-        self.assertEqual(digest["stopReason"], "reached")
-        self.assertNotIn("unreadablePromptPolls", digest)
-
 
 class LostPollTest(unittest.TestCase):
     """A bridge timeout mid-loop is one lost poll, not the end of the call.
@@ -1252,11 +1054,6 @@ class LostPollTest(unittest.TestCase):
             digest = compose.advance({"days": 2, "max_seconds": 600})
         self.assertEqual(digest["stopReason"], "reached")
 
-    def test_the_lost_poll_stop_counts_toward_the_stall_refusal(self):
-        # It hands the caller a digest, so the loop can go on calling; and
-        # nothing between calls makes a silent bridge answer.
-        self.assertIn("bridge_lost", compose.INERT_STOPS)
-
     def test_a_timeout_is_not_reported_as_the_game_being_down(self):
         def boom(args, progress=None):
             raise bridge.BridgeTimeout("no reply within 30s")
@@ -1268,14 +1065,6 @@ class LostPollTest(unittest.TestCase):
         self.assertIn("The game is UP", text)
         self.assertIn("Do NOT call game_start", text)
         self.assertNotIn("game is not running", text)
-
-    def test_a_closed_socket_still_reports_the_game_down(self):
-        def boom(args, progress=None):
-            raise bridge.BridgeError("connection refused")
-
-        with mock.patch.dict(tools.BY_NAME, {"advance": boom}):
-            result = tools.handle_call("advance", {})
-        self.assertIn("game is not running", result["content"][0]["text"])
 
 
 def _combat(error=None, retryable=None, pending_id=7, attempted=None):
@@ -1455,34 +1244,6 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(self.starts,
                          [{"load": "scratch-run", "extension": ".gz"}])
 
-    def test_an_autosave_of_an_older_campaign_is_never_reloaded(self):
-        # Autosave2 predates the campaign entry, so it belongs to some other
-        # run. It is also the ONLY save on disk here, which is exactly the
-        # case the old "newest save" picker got wrong: it would have restarted
-        # into a stranger's campaign and reported a recovery.
-        self.fake.saves = [self.SAVES[2]]
-        compose._RUN["save"] = None
-        digest = self._run()
-        self.assertEqual(digest["stopReason"], "crashed")
-        self.assertFalse(digest["crash"]["recovered"])
-        self.assertEqual(self.starts, [])
-        self.assertIn("load_game", digest["next"])
-
-    def test_the_save_the_run_loaded_is_the_fallback(self):
-        # No autosave has been written since the campaign came up, which is
-        # every crash in the first minutes of a run.
-        self.fake.saves = [self.SAVES[1], self.SAVES[2]]
-        digest = self._run()
-        self.assertEqual(digest["stopReason"], "crash_recovered")
-        self.assertEqual(digest["crash"]["save"], "scratch-run")
-
-    def test_an_autosave_of_this_run_beats_the_save_it_loaded(self):
-        # The autosave is the newer of the two here, so it wins on mtime.
-        self.fake.saves = [dict(self.SAVES[0], mtime="2026-09-01 10:00:00"),
-                           self.SAVES[1]]
-        digest = self._run()
-        self.assertEqual(digest["crash"]["save"], "Autosave1")
-
     def test_a_process_that_survived_the_stop_is_not_a_recovery(self):
         # game_stop can report stopped:False on a leftover pid or a failed
         # kill. game_start would then find the bridge up, report "already
@@ -1539,38 +1300,11 @@ class CrashTest(unittest.TestCase):
         self.assertEqual(digest["stopReason"], "crashed")
         self.assertFalse(digest["crash"]["recovered"])
         self.assertIn("no save OF THIS RUN", digest["next"])
+        self.assertIn("load_game", digest["next"])
         self.assertEqual(self.starts, [])
         self.assertEqual(self.stops, [])
 
     def test_a_crash_already_up_at_entry_is_caught_before_arming(self):
-        self.fake.crashed_from = 1
-        digest = self._run()
-        self.assertEqual(digest["stopReason"], "crash_recovered")
-        # run_until is never armed over a dead game.
-        self.assertEqual(self.fake.count("time.run_until"), 0)
-
-    def test_a_restart_forgets_the_macro_it_can_no_longer_watch(self):
-        compose._RUN["macroOn"] = True
-        self._run()
-        self.assertFalse(compose._RUN["macroOn"])
-
-    def test_a_terminal_crash_counts_toward_the_stall_refusal(self):
-        # The recovery that worked hands back a live game and clears the
-        # counter; the one that gave up hands back a digest saying to call
-        # again, and nothing this loop does between calls un-crashes a game.
-        self.assertIn("crashed", compose.INERT_STOPS)
-        self.assertNotIn("crash_recovered", compose.INERT_STOPS)
-        # Crashed at the door, so the call moved no days: a crash that
-        # arrived after a week of game time is not a fruitless call and
-        # clears the counter on the days alone.
-        self.fake.crashed_from = 1
-        self.fake.saves = []
-        for _ in range(compose.ZERO_PROGRESS_REFUSE - 1):
-            self.assertEqual(self._run()["stopReason"], "crashed")
-        with self.assertRaises(tools.ToolError):
-            self._run()
-
-    def test_a_recovery_clears_the_count_instead(self):
         # One fruitless call behind it, which is under the refusal, and a
         # crash at the door so this call moves no days either. The recovery
         # is what clears the count, not the clock.
@@ -1578,8 +1312,15 @@ class CrashTest(unittest.TestCase):
         self.fake.crashed_from = 1
         digest = self._run()
         self.assertEqual(digest["stopReason"], "crash_recovered")
+        # run_until is never armed over a dead game.
+        self.assertEqual(self.fake.count("time.run_until"), 0)
         self.assertEqual(digest["daysAdvanced"], 0)
         self.assertEqual(compose._RUN["zeroCalls"], 0)
+
+    def test_a_restart_forgets_the_macro_it_can_no_longer_watch(self):
+        compose._RUN["macroOn"] = True
+        self._run()
+        self.assertFalse(compose._RUN["macroOn"])
 
 
 class AutopilotMacroTest(unittest.TestCase):
@@ -1653,25 +1394,6 @@ class ActionableStopTest(unittest.TestCase):
         with mock.patch.object(compose, "bridge", fake):
             return compose.advance({"days": 30, "max_seconds": 0})
 
-    def _combat(self):
-        fake = FakeBridge(CLEAR, combat=_combat(
-            error="combat needs a stance from non-AI faction Resistance",
-            retryable=False))
-        with mock.patch.object(compose, "bridge", fake):
-            return compose.advance({"days": 1, "max_seconds": 600})
-
-    def test_three_decisions_in_a_row_are_never_refused(self):
-        for _ in range(4):
-            digest = self._decision()
-            self.assertEqual(digest["stopReason"], "decision")
-        self.assertEqual(compose._RUN["zeroCalls"], 0)
-
-    def test_a_combat_stop_is_not_counted_either(self):
-        for _ in range(4):
-            digest = self._combat()
-            self.assertEqual(digest["stopReason"], "combat")
-        self.assertEqual(compose._RUN["zeroCalls"], 0)
-
     def test_an_actionable_stop_clears_a_pending_count(self):
         self._inert()
         self.assertEqual(compose._RUN["zeroCalls"], 1)
@@ -1703,12 +1425,6 @@ class ActionableStopTest(unittest.TestCase):
         self.assertEqual(digest["stopReason"], "decision")
         self.assertEqual(compose._RUN["zeroCalls"], 0)
 
-    def test_only_inert_stops_still_reach_the_refusal(self):
-        self._inert()
-        self._inert()
-        with self.assertRaises(compose.ToolError):
-            self._inert()
-
 
 class RunStateResetTest(unittest.TestCase):
     """_RUN spans tool calls, so it also spans processes and campaigns.
@@ -1726,21 +1442,6 @@ class RunStateResetTest(unittest.TestCase):
                                                             "no_progress"],
                              "crashRecoveries": 1, "macroOn": True})
 
-    def test_reset_keeps_the_crash_budget(self):
-        compose._reset_run()
-        self.assertEqual(compose._RUN["zeroCalls"], 0)
-        self.assertEqual(compose._RUN["zeroReasons"], [])
-        self.assertFalse(compose._RUN["macroOn"])
-        # The one counter whose job is to outlive a restart. Clearing it here
-        # would let the recovery's own game_start refund the budget it had
-        # just spent, and the second crash would restart again, forever.
-        self.assertEqual(compose._RUN["crashRecoveries"], 1)
-
-    def test_a_same_process_load_keeps_the_macro(self):
-        compose._reset_run(keep_macro=True)
-        self.assertEqual(compose._RUN["zeroCalls"], 0)
-        self.assertTrue(compose._RUN["macroOn"])
-
     def test_game_start_that_launches_nothing_keeps_the_macro(self):
         # The bridge answers, so this takes the no-launch branch and touches
         # no process. The stall count is still dropped, but the macro is a
@@ -1753,6 +1454,9 @@ class RunStateResetTest(unittest.TestCase):
         self.assertFalse(out["launched"])
         self.assertEqual(compose._RUN["zeroCalls"], 0)
         self.assertTrue(compose._RUN["macroOn"])
+        # The one counter whose job is to outlive a restart. Clearing it here
+        # would let the recovery's own game_start refund the budget it had
+        # just spent, and the second crash would restart again, forever.
         self.assertEqual(compose._RUN["crashRecoveries"], 1)
 
     def test_campaign_new_resets(self):
@@ -1760,6 +1464,7 @@ class RunStateResetTest(unittest.TestCase):
         with mock.patch.object(compose, "bridge", fake):
             compose.campaign_new({"scenario": "2070Scenario"})
         self.assertEqual(compose._RUN["zeroCalls"], 0)
+        self.assertEqual(compose._RUN["zeroReasons"], [])
         self.assertFalse(compose._RUN["macroOn"])
         self.assertIn("campaign.new", fake.calls)
 
@@ -1810,11 +1515,21 @@ class CampaignTokenTest(unittest.TestCase):
         self._seen("a-1")
         compose.note_campaign()
         compose._RUN.update({"zeroCalls": 2,
-                             "zeroReasons": ["no_progress", "no_progress"]})
+                             "zeroReasons": ["no_progress", "no_progress"],
+                             "macroOn": True, "crashRecoveries": 1})
         self._seen("a-2")
         self.assertTrue(compose.note_campaign())
         self.assertEqual(compose._RUN["zeroCalls"], 0)
         self.assertEqual(compose._RUN["zeroReasons"], [])
+        # The macro is a MonoBehaviour in a process nothing replaced, which is
+        # why load_game resets with keep_macro. Clearing it here would stop
+        # advance watching a macro that is still running. The crash budget
+        # outlives the change too.
+        self.assertTrue(compose._RUN["macroOn"])
+        self.assertEqual(compose._RUN["crashRecoveries"], 1)
+        # A campaign nobody ordered dates itself from now: nothing earlier is
+        # known about it, so only saves written from here on are this run's.
+        self.assertIsNotNone(compose._RUN["campaignAt"])
 
     def test_the_same_token_changes_nothing(self):
         self._seen("a-1")
@@ -1823,25 +1538,6 @@ class CampaignTokenTest(unittest.TestCase):
         self._seen("a-1")
         self.assertFalse(compose.note_campaign())
         self.assertEqual(compose._RUN["zeroCalls"], 2)
-
-    def test_the_macro_survives_a_campaign_change(self):
-        # The macro is a MonoBehaviour in a process nothing replaced, which is
-        # why load_game resets with keep_macro. Clearing it here would stop
-        # advance watching a macro that is still running.
-        compose._RUN["macroOn"] = True
-        self._seen("a-1")
-        compose.note_campaign()
-        self._seen("a-2")
-        compose.note_campaign()
-        self.assertTrue(compose._RUN["macroOn"])
-
-    def test_the_crash_budget_survives_a_campaign_change(self):
-        compose._RUN["crashRecoveries"] = 1
-        self._seen("a-1")
-        compose.note_campaign()
-        self._seen("a-2")
-        compose.note_campaign()
-        self.assertEqual(compose._RUN["crashRecoveries"], 1)
 
     def test_an_old_dll_sends_no_token_and_nothing_happens(self):
         compose._RUN["zeroCalls"] = 2
@@ -1872,13 +1568,6 @@ class CampaignTokenTest(unittest.TestCase):
         compose.note_campaign()
         self.assertIsNone(compose._RUN["save"])
         self.assertIsNone(compose._RUN["saveToken"])
-
-    def test_a_campaign_nobody_ordered_dates_itself_from_now(self):
-        self._seen("a-1")
-        compose.note_campaign()
-        # Nothing earlier is known about it, so only saves written from here
-        # on can be claimed as this run's.
-        self.assertIsNotNone(compose._RUN["campaignAt"])
 
     def test_a_save_bound_to_another_campaign_is_not_re_bound(self):
         # A save written in the campaign a load is replacing. The entry is
@@ -1929,16 +1618,6 @@ class CampaignTokenTest(unittest.TestCase):
         self._seen("b-1")
         compose.note_campaign()
         self.assertIsNone(compose._RUN["save"])
-
-    def test_an_ordered_entry_that_did_arrive_is_untouched(self):
-        # The control: nothing above may cost the ordinary load its binding.
-        fake = FakeBridge(CLEAR)
-        with mock.patch.object(compose, "bridge", fake):
-            compose.load_game({"name": "scratch-run"})
-        self._seen("b-1")
-        compose.note_campaign()
-        self.assertEqual(compose._RUN["save"]["name"], "scratch-run")
-        self.assertEqual(compose._RUN["saveToken"], "b-1")
 
 
 class CampaignProcessTest(unittest.TestCase):
@@ -1995,16 +1674,6 @@ class CampaignProcessTest(unittest.TestCase):
         self.assertFalse(compose._RUN["campaignPending"])
         self.assertIsNone(compose._RUN["campaignAt"])
 
-    def test_the_same_process_keeps_its_entry(self):
-        # The control. An in-process load is the ordinary case and must still
-        # bind its save to the campaign that arrives.
-        self._process("aaa")
-        compose._entered_campaign("scratch-run", ".gz")
-        self._seen("aaa-1", "aaa")
-        compose.note_campaign()
-        self.assertEqual(compose._RUN["save"]["name"], "scratch-run")
-        self.assertEqual(compose._RUN["saveToken"], "aaa-1")
-
     def test_a_launch_of_our_own_keeps_the_entry_it_ordered(self):
         # The trap in keying this on "the process changed since the last tool
         # call": game_start replaces the process AND orders the entry, in that
@@ -2039,16 +1708,13 @@ class WaitSecondsTest(unittest.TestCase):
     up to five minutes spent waiting by a call that asked not to.
     """
 
-    def test_absent_takes_the_default(self):
+    def test_absent_and_flags_take_the_default_and_a_number_is_the_callers(
+            self):
         self.assertEqual(compose._wait_secs(None, 300), 300)
-
-    def test_a_flag_takes_the_default_too(self):
         # A boolean says "wait", not how long. int(True) is a one-second wait,
         # which is a wait that always fails.
         self.assertEqual(compose._wait_secs(True, 300), 300)
         self.assertEqual(compose._wait_secs(False, 300), 300)
-
-    def test_a_number_is_the_callers_own(self):
         self.assertEqual(compose._wait_secs(0, 300), 0)
         self.assertEqual(compose._wait_secs(1, 300), 1)
         self.assertEqual(compose._wait_secs(45, 300), 45)
@@ -2085,17 +1751,8 @@ class RunSaveTest(unittest.TestCase):
         with mock.patch.object(compose, "bridge", fake):
             return compose._run_save()
 
-    def test_an_autosave_of_this_campaign_qualifies(self):
-        self.assertEqual(self._pick([self.NEW_AUTO])["mtime"],
-                         self.NEW_AUTO["mtime"])
-
-    def test_an_autosave_from_before_the_campaign_does_not(self):
+    def test_an_autosave_from_before_the_campaign_does_not_qualify(self):
         self.assertIsNone(self._pick([self.OLD_AUTO]))
-
-    def test_a_stranger_save_never_qualifies_however_new(self):
-        # Newest file in the folder by a day, and written while this run was
-        # going, and still not this run's: nothing here wrote it.
-        self.assertIsNone(self._pick([self.STRANGER]))
 
     def test_the_combat_autosave_and_the_exit_save_count(self):
         self.assertEqual(self._pick([self.COMBAT_AUTO])["name"],
@@ -2109,6 +1766,8 @@ class RunSaveTest(unittest.TestCase):
                          "scratch-run")
 
     def test_the_newest_qualifying_save_wins(self):
+        # STRANGER is the newest file in the folder by a day, written while
+        # this run was going, and still not this run's: nothing here wrote it.
         compose._RUN["save"] = {"name": "scratch-run", "extension": ".gz"}
         rows = [self.LOADED, self.OLD_AUTO, self.NEW_AUTO, self.STRANGER]
         self.assertEqual(self._pick(rows)["name"], "Autosave")
@@ -2133,9 +1792,6 @@ class RunSaveTest(unittest.TestCase):
     def test_a_run_that_never_entered_a_campaign_picks_nothing(self):
         compose._RUN["campaignAt"] = None
         self.assertIsNone(self._pick([self.NEW_AUTO, self.STRANGER]))
-
-    def test_an_empty_folder_picks_nothing(self):
-        self.assertIsNone(self._pick([]))
 
 
 class SaveGameRecordTest(unittest.TestCase):

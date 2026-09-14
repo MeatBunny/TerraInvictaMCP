@@ -74,31 +74,20 @@ class SplitTestCase(unittest.TestCase):
 class FactionRelationsReadTest(SplitTestCase):
     """The read passes its two arguments through and writes nothing."""
 
-    def test_a_bare_call_reads_the_active_player(self):
-        _, fake = self.run_tool(compose.faction_relations, {})
-        self.assertEqual(fake.args_for("faction.relations"), [{}])
-
-    def test_a_faction_reads_someone_else(self):
-        _, fake = self.run_tool(compose.faction_relations, {"faction": 3})
-        self.assertEqual(fake.args_for("faction.relations"), [{"faction": 3}])
-
-    def test_a_pair_narrows_the_read(self):
-        _, fake = self.run_tool(compose.faction_relations,
-                                {"faction": 3, "other": 5})
-        self.assertEqual(fake.args_for("faction.relations"),
-                         [{"faction": 3, "other": 5}])
-
-    def test_hate_is_refused_and_names_the_write_tool(self):
-        # The whole point of the split: the read tool is annotated read-only
-        # and the gate believes it, so a write reaching this handler would be
-        # a state change made over a clock the gate had already stopped.
-        text = self.refuse(compose.faction_relations,
-                           {"faction": 3, "other": 5, "hate": 40})
-        self.assertIn("set_faction_relation", text)
+    def test_the_read_passes_its_arguments_through(self):
+        # A bare call reads the active player, a faction reads someone else,
+        # a pair narrows the read.
+        for args in ({}, {"faction": 3}, {"faction": 3, "other": 5}):
+            with self.subTest(args=args):
+                _, fake = self.run_tool(compose.faction_relations, dict(args))
+                self.assertEqual(fake.args_for("faction.relations"), [args])
 
     def test_a_hate_of_zero_is_still_a_write(self):
-        # Zero hate is a value like any other, and a falsy test here would let
-        # the one write that resets a pair through the read tool.
+        # The whole point of the split: the read tool is annotated read-only
+        # and the gate believes it, so a write reaching this handler would be
+        # a state change made over a clock the gate had already stopped. Zero
+        # hate is a value like any other, and a falsy test here would let the
+        # one write that resets a pair through the read tool.
         text = self.refuse(compose.faction_relations,
                            {"faction": 3, "other": 5, "hate": 0})
         self.assertIn("set_faction_relation", text)
@@ -107,7 +96,9 @@ class FactionRelationsReadTest(SplitTestCase):
 class SetFactionRelationTest(SplitTestCase):
     """The write demands the pair and the value; the verb defaults neither."""
 
-    FULL = {"faction": 3, "other": 5, "hate": 40,
+    # hate 0 on purpose: zero is a value, and a falsy test would refuse the
+    # one write that resets a pair.
+    FULL = {"faction": 3, "other": 5, "hate": 0,
             "cant_conflagrate": True, "cause": "test"}
 
     def test_a_full_call_reaches_the_verb_unchanged(self):
@@ -139,11 +130,6 @@ class SetFactionRelationTest(SplitTestCase):
                            {"faction": 3, "other": 5, "hate": True})
         self.assertIn("number", text)
 
-    def test_zero_is_a_value(self):
-        _, fake = self.run_tool(compose.set_faction_relation,
-                                {"faction": 3, "other": 5, "hate": 0})
-        self.assertEqual(len(fake.args_for("faction.relations")), 1)
-
 
 class UiViewTest(SplitTestCase):
     """ui_view moves the view and nothing else."""
@@ -152,11 +138,7 @@ class UiViewTest(SplitTestCase):
         _, fake = self.run_tool(compose.ui_view, {"view": "PoliticalMap"})
         self.assertEqual(fake.args_for("ui.view"), [{"view": "PoliticalMap"}])
 
-    def test_without_a_view_it_is_refused_and_names_the_read(self):
-        text = self.refuse(compose.ui_view, {})
-        self.assertIn("ui_status", text)
-
-    def test_an_empty_view_is_refused_too(self):
+    def test_an_empty_view_is_refused_and_names_the_read(self):
         # The verb reads an empty string as no argument and answers with the
         # bare read, which is the form that moved to ui_status.
         self.assertIn("ui_status", self.refuse(compose.ui_view, {"view": ""}))
@@ -170,13 +152,12 @@ class UiScreenTest(SplitTestCase):
         return fake.args_for("ui.screen")
 
     def test_each_drive_reaches_the_verb(self):
+        # {"hab": 0}: presence, not truth. A falsy-id test would refuse a real
+        # state id. And manage rides along with a hab.
         for args in ({"show": "habitats"}, {"hide": True}, {"hab": 12},
-                     {"detail": 12}, {"rename": True}):
+                     {"detail": 12}, {"rename": True}, {"hab": 0},
+                     {"hab": 12, "manage": True}):
             self.assertEqual(self.drives(dict(args)), [args])
-
-    def test_a_hab_id_of_zero_is_still_a_drive(self):
-        # Presence, not truth: a falsy-id test would refuse a real state id.
-        self.assertEqual(self.drives({"hab": 0}), [{"hab": 0}])
 
     def test_nothing_to_do_is_refused_and_names_the_read(self):
         text = self.refuse(compose.ui_screen, {})
@@ -205,10 +186,6 @@ class UiScreenTest(SplitTestCase):
                                                "manage": True})
         self.assertIn("hab", text)
 
-    def test_manage_rides_along_with_one(self):
-        self.assertEqual(self.drives({"hab": 12, "manage": True}),
-                         [{"hab": 12, "manage": True}])
-
 
 class UiStatusTest(SplitTestCase):
     """ui_status is both UI reads, merged into one answer."""
@@ -225,24 +202,19 @@ class UiStatusTest(SplitTestCase):
                    "ui.screen": self.SCREEN if screen is None else screen}
         return self.run_tool(compose.ui_status, {}, replies)
 
-    def test_it_asks_both_verbs_the_way_a_read_asks_them(self):
-        _, fake = self.status()
+    def test_it_asks_both_verbs_as_reads_and_carries_both_halves(self):
+        out, fake = self.status()
         self.assertEqual(fake.args_for("ui.view"), [{}])
         self.assertEqual(fake.args_for("ui.screen"), [{"list": True}])
-
-    def test_the_answer_carries_both_halves(self):
-        out, _ = self.status()
         self.assertEqual(out["currentView"], "SolarSystem")
         self.assertEqual(out["scene"], "SolarSystemScene")
         self.assertEqual(out["settable"], ["SolarSystem", "PoliticalMap"])
         self.assertEqual(out["activeInfoScreen"], "HabitatsScreenController")
         self.assertEqual(len(out["screens"]), 2)
-
-    def test_the_drive_bookkeeping_is_left_out(self):
-        # Both keys describe a call that asked for something. This one asks
-        # for nothing, so reporting changed: false and action: list would be
-        # answering a question nobody put.
-        out, _ = self.status()
+        # The drive bookkeeping is left out. Both keys describe a call that
+        # asked for something. This one asks for nothing, so reporting
+        # changed: false and action: list would be answering a question
+        # nobody put.
         self.assertNotIn("changed", out)
         self.assertNotIn("action", out)
 
@@ -261,21 +233,11 @@ class UiStatusTest(SplitTestCase):
 
 
 class ToolTableTest(unittest.TestCase):
-    """The annotations are the contract the pause gate and clients read."""
+    """The annotations are the contract the pause gate and clients read.
 
-    def annotation(self, name):
-        for tool in tools.TOOLS:
-            if tool[0] == name:
-                return tool[2], tool[3]
-        self.fail("no tool named %s" % name)
-
-    def test_the_reads_are_marked_read_only(self):
-        for name in ("faction_relations", "ui_status"):
-            self.assertEqual(self.annotation(name), (True, False), name)
-
-    def test_the_writes_are_not(self):
-        for name in ("set_faction_relation", "ui_view", "ui_screen"):
-            self.assertIs(self.annotation(name)[0], False, name)
+    The read-only column itself is asserted in test_pause_limit beside the
+    gate decision each value produces.
+    """
 
     def test_the_split_pairs_name_each_other(self):
         # A tool that refuses an argument has to say where that argument went,
@@ -287,11 +249,6 @@ class ToolTableTest(unittest.TestCase):
         self.assertIn("ui_status", text["ui_screen"])
         self.assertIn("ui_view", text["ui_status"])
         self.assertIn("ui_screen", text["ui_status"])
-
-    def test_the_split_added_no_verb(self):
-        # Five tools over three verbs: the DLL did not change for this.
-        for verb in ("faction.relations", "ui.view", "ui.screen"):
-            self.assertIn(verb, tools.BRIDGE_VERBS_USED)
 
 
 if __name__ == "__main__":

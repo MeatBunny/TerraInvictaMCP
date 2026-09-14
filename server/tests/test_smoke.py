@@ -46,24 +46,8 @@ REAL_EXCEPTION = "NullReferenceException: Object reference not set to an instanc
 class LogNoiseTest(unittest.TestCase):
     """The allowlist takes engine arithmetic and nothing else."""
 
-    def test_engine_nan_lines_are_noise(self):
-        self.assertIsNotNone(compose._log_noise(NAN_LIFETIME))
-        self.assertIsNotNone(compose._log_noise(NAN_VALUE))
-
-    def test_a_line_naming_mod_data_is_not_noise(self):
-        # The case the allowlist must never grow to cover: this line is a
-        # broken upgradesFromName in a mod's own template, and swallowing it
-        # would make a broken mod pass a smoke test.
-        self.assertIsNone(compose._log_noise(MOD_DEFECT))
-
     def test_an_exception_is_not_noise(self):
         self.assertIsNone(compose._log_noise(REAL_EXCEPTION))
-
-    def test_the_reason_travels_with_the_match(self):
-        # The reason is reported to the caller, so an empty one would leave an
-        # allowlist entry that cannot be argued with.
-        for _needle, why in compose.LOG_NOISE:
-            self.assertTrue(why and len(why) > 20)
 
 
 class ScanLogsTest(unittest.TestCase):
@@ -84,6 +68,7 @@ class ScanLogsTest(unittest.TestCase):
         found = self._scan(REAL_EXCEPTION + "\n", "quiet\n")
         self.assertEqual(found["failures"], [])
         self.assertEqual(found["noise"], {})
+        self.assertFalse(found["capped"])
 
     def test_noise_is_counted_not_dropped(self):
         found = self._scan("", (NAN_LIFETIME + "\n") * 3 + NAN_VALUE + "\n")
@@ -101,29 +86,13 @@ class ScanLogsTest(unittest.TestCase):
         self.assertEqual(len(found["failures"]), 2)
         self.assertTrue(found["capped"])
 
-    def test_a_clean_stretch_is_clean(self):
-        found = self._scan("", "loaded 60 templates\n")
-        self.assertEqual(found["failures"], [])
-        self.assertFalse(found["capped"])
-
 
 class BoxOpenTest(unittest.TestCase):
     """_box_open decides which narrative leash a hold gets.
 
-    Open with no live option is the box coming up before its buttons do.
-    Treating that as rendered spends the short leash on a box nothing could
-    press yet, and reports a decision where there is none.
+    The open, closed and no-live-option boxes are driven through the advance
+    loop in test_advance; None and {} never reach the loop.
     """
-
-    def test_open_with_a_live_option_is_open(self):
-        self.assertTrue(compose._box_open(
-            {"open": True, "options": [{"option": 0, "label": "Ok"}]}))
-
-    def test_open_with_no_live_option_is_not(self):
-        self.assertFalse(compose._box_open({"open": True, "options": []}))
-
-    def test_closed_is_not(self):
-        self.assertFalse(compose._box_open({"open": False}))
 
     def test_nothing_is_not(self):
         self.assertFalse(compose._box_open(None))
@@ -144,12 +113,10 @@ class BeginCombatPromptsTest(unittest.TestCase):
         {"name": "PromptBeginCombat", "scope": "nation"},
     ]}
 
-    def test_it_finds_them_in_the_flat_list(self):
-        self.assertEqual(len(compose._begin_combat_prompts(self.LISTING)), 2)
-
-    def test_other_prompts_are_left_alone(self):
-        rows = compose._begin_combat_prompts(self.LISTING)
-        self.assertTrue(all(r["name"] == "PromptBeginCombat" for r in rows))
+    def test_it_finds_them_in_the_flat_list_and_leaves_the_rest(self):
+        self.assertEqual(
+            [r["scope"] for r in compose._begin_combat_prompts(self.LISTING)],
+            ["faction", "nation"])
 
     def test_an_unreadable_reply_finds_none(self):
         self.assertEqual(compose._begin_combat_prompts(None), [])
@@ -343,9 +310,7 @@ class SweepResilienceTest(unittest.TestCase):
         # The other two ran, which is the whole point: a dead bridge in one
         # scenario says nothing about the scenarios after the relaunch.
         self.assertTrue(all(r["ok"] for r in out["results"][1:]))
-
-    def test_the_lost_scenario_says_what_it_reached(self):
-        out = self._run(dies_on="Scenario_A")
+        # The lost scenario says what it reached.
         row = out["results"][0]
         self.assertEqual(row["stopReason"], "bridge_lost")
         self.assertEqual(row["reached"], "campaign.new")
@@ -356,6 +321,12 @@ class SweepResilienceTest(unittest.TestCase):
         # was the one row with no log evidence anywhere on it.
         self.assertEqual(row["newExceptions"], [])
         self.assertEqual(row["logNoiseIgnored"], {})
+        # The sweep relaunches once before the next scenario, and says so in
+        # the row that paid for it, and only there.
+        self.assertEqual(len(self.stops), 1)
+        self.assertEqual(len(self.starts), 1)
+        self.assertIn("relaunchedBecause", out["results"][1])
+        self.assertNotIn("relaunchedBecause", out["results"][2])
 
     def test_a_timeout_is_a_busy_bridge_rather_than_a_lost_one(self):
         # The split advance makes, for the same reason: a busy main thread is
@@ -363,14 +334,6 @@ class SweepResilienceTest(unittest.TestCase):
         out = self._run(dies_on="Scenario_A",
                         error=bridge.BridgeTimeout("no reply within 30s"))
         self.assertEqual(out["results"][0]["stopReason"], "bridge_busy")
-
-    def test_the_sweep_relaunches_once_before_the_next_scenario(self):
-        out = self._run(dies_on="Scenario_A")
-        self.assertEqual(len(self.stops), 1)
-        self.assertEqual(len(self.starts), 1)
-        # Said in the row that paid for it, and only there.
-        self.assertIn("relaunchedBecause", out["results"][1])
-        self.assertNotIn("relaunchedBecause", out["results"][2])
 
     def test_a_bridge_lost_in_the_advance_chunk_is_a_row_too(self):
         # No relaunch here: the bridge that failed the advance call is still

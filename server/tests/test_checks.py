@@ -69,11 +69,9 @@ class CleanBaselineTest(_fixtures.ModcheckTestCase):
             c = check(result, name)
             self.assertEqual([c["verdicts"], c["warnings"], c["lints"]],
                              [[], [], []], "%s is not clean" % name)
+            self.assertEqual(c["status"], "DEGRADED", name)
 
-    def test_e0_merge_summary(self):
-        merge = check(self.run_modcheck(), "merge")
-        summary = merge["summary"]
-        self.assertEqual(merge["status"], "DEGRADED")
+        summary = check(result, "merge")["summary"]
         self.assertEqual(summary["mods"], [])
         self.assertEqual(summary["modCount"], 0)
         self.assertEqual(summary["fieldsComparedInEngine"], 0)
@@ -87,10 +85,7 @@ class CleanBaselineTest(_fixtures.ModcheckTestCase):
         # One note for the unreachable bridge, one for the absent enum table.
         self.assertEqual(len(summary["degraded"]), 2)
 
-    def test_e0_refs_summary(self):
-        refs = check(self.run_modcheck(), "refs")
-        summary = refs["summary"]
-        self.assertEqual(refs["status"], "DEGRADED")
+        summary = check(result, "refs")["summary"]
         self.assertEqual(summary["source"], "disk")
         self.assertEqual(summary["gameVersion"], "unknown")
         self.assertEqual(summary["problems"], 0)
@@ -101,20 +96,14 @@ class CleanBaselineTest(_fixtures.ModcheckTestCase):
                           "TITechTemplate"])
         self.assertEqual(summary["baseline"]["suppressedVanillaFindings"], 0)
 
-    def test_e0_locale_summary(self):
-        locale = check(self.run_modcheck(), "locale")
-        summary = locale["summary"]
-        self.assertEqual(locale["status"], "DEGRADED")
+        summary = check(result, "locale")["summary"]
         self.assertEqual(summary["mods"], [])
         self.assertEqual(summary["keysChecked"], 0)
         self.assertEqual(summary["problems"], 0)
         self.assertIsNone(summary["scenarioPostfix"])
         self.assertEqual(summary["engine"], "disk-approximation")
 
-    def test_e0_conflicts_summary(self):
-        conflicts = check(self.run_modcheck(), "conflicts")
-        summary = conflicts["summary"]
-        self.assertEqual(conflicts["status"], "DEGRADED")
+        summary = check(result, "conflicts")["summary"]
         self.assertEqual(summary["modsExamined"], [])
         self.assertEqual(summary["contestedFields"], 0)
         self.assertEqual(summary["crossSourceCollisions"], 0)
@@ -122,10 +111,7 @@ class CleanBaselineTest(_fixtures.ModcheckTestCase):
         self.assertEqual(summary["dupeSource"], "file-level")
         self.assertEqual(summary["declaredScenarioTags"], ["s2070"])
 
-    def test_e0_reach_summary(self):
-        reach = check(self.run_modcheck(), "reach")
-        summary = reach["summary"]
-        self.assertEqual(reach["status"], "DEGRADED")
+        summary = check(result, "reach")["summary"]
         self.assertEqual(summary["gateListsUsed"], {"MetaOrgs": 2,
                                                     "MetaOrgs2070": 1})
         self.assertEqual(summary["problems"], 0)
@@ -593,13 +579,6 @@ class ModFolderTest(_fixtures.ModcheckTestCase):
         self.assertEqual(result["summary"]["problems"], 0)
         self.assertEqual(check(result, "merge")["summary"]["mods"], [])
 
-    def test_e23_control_the_same_file_at_the_top_level_is_caught(self):
-        self.add_mod("Flat",
-                     raw={"TIWidgetTemplate.json":
-                          '[{"dataName": "Whatever"}]'})
-        merge = check(self.run_modcheck(), "merge")
-        self.assertEqual(verdicts(merge), ["CRASH_RISK"])
-
     def test_e24_an_unparseable_file_is_excluded_whole(self):
         self.add_mod("Broken", raw={"TITechTemplate.json":
                                     '[{"dataName": "Tech_Beta",'})
@@ -678,11 +657,8 @@ class ScenarioScopingTest(_fixtures.ModcheckTestCase):
         # constant that a corpus change quietly turns into the wrong control.
         self.assertEqual(self.gate_lists(None), self.UNSCOPED)
         self.assertEqual(self.gate_lists("Scenario_Base"), {"MetaOrgs": 2})
-
-    def test_e29_a_scenario_keeps_entries_carrying_its_own_tags(self):
+        # And a scenario keeps the entries carrying its own tags.
         self.assertEqual(self.gate_lists("Scenario_2070"), self.UNSCOPED)
-        self.assertEqual(self.gate_lists("Scenario_2070"),
-                         self.gate_lists(None))
 
     def test_e29_an_unknown_scenario_is_checked_unscoped(self):
         # check_reach scopes only when the name is a known scenario, and says

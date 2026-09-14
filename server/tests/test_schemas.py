@@ -64,18 +64,26 @@ class DesignCreateItemsTest(unittest.TestCase):
     def setUp(self):
         self.schema = published("design_create")
 
+    def assert_item(self, key, other):
+        """The list at `key` publishes a closed item schema of an integer
+        `slot` and a string `other`, both required."""
+        prop = self.schema["properties"][key]
+        self.assertEqual("array", prop["type"], key)
+        item = prop.get("items")
+        self.assertIsNotNone(item, "%s publishes no item schema" % key)
+        self.assertEqual("object", item["type"], key)
+        self.assertEqual({"slot", other}, set(item["properties"]), key)
+        self.assertEqual("integer", item["properties"]["slot"]["type"], key)
+        self.assertEqual("string", item["properties"][other]["type"], key)
+        self.assertEqual({"slot", other}, set(item["required"]), key)
+        self.assertFalse(item["additionalProperties"], key)
+
     def test_each_entry_list_declares_its_item_shape(self):
         for key in ENTRY_LISTS:
-            prop = self.schema["properties"][key]
-            self.assertEqual("array", prop["type"], key)
-            item = prop.get("items")
-            self.assertIsNotNone(item, "%s publishes no item schema" % key)
-            self.assertEqual("object", item["type"], key)
-            self.assertEqual({"slot", "name"}, set(item["properties"]), key)
-            self.assertEqual("integer", item["properties"]["slot"]["type"], key)
-            self.assertEqual("string", item["properties"]["name"]["type"], key)
-            self.assertEqual({"slot", "name"}, set(item["required"]), key)
-            self.assertFalse(item["additionalProperties"], key)
+            self.assert_item(key, "name")
+        # A fire mode is keyed on the slot like a part entry, but its other
+        # key is the FireMode name and not a template data name.
+        self.assert_item("fire_modes", "mode")
 
     def test_armor_declares_three_facings_of_material_and_value(self):
         armor = self.schema["properties"]["armor"]
@@ -99,28 +107,12 @@ class DesignCreateItemsTest(unittest.TestCase):
 
     def test_armor_stays_required_and_the_lists_optional(self):
         self.assertIn("armor", self.schema["required"])
-        for key in ENTRY_LISTS:
+        for key in ENTRY_LISTS + ("fire_modes",):
             self.assertNotIn(key, self.schema["required"], key)
 
     def test_no_internal_marker_reaches_the_published_schema(self):
         for path, schema in walk(self.schema):
             self.assertNotIn("_req", schema, path)
-
-
-    def test_fire_modes_declares_slot_and_mode(self):
-        prop = self.schema["properties"]["fire_modes"]
-        self.assertEqual("array", prop["type"])
-        item = prop.get("items")
-        self.assertIsNotNone(item, "fire_modes publishes no item schema")
-        self.assertEqual("object", item["type"])
-        # A fire mode is keyed on the slot like a part entry, but its other
-        # key is the FireMode name and not a template data name.
-        self.assertEqual({"slot", "mode"}, set(item["properties"]))
-        self.assertEqual("integer", item["properties"]["slot"]["type"])
-        self.assertEqual("string", item["properties"]["mode"]["type"])
-        self.assertEqual({"slot", "mode"}, set(item["required"]))
-        self.assertFalse(item["additionalProperties"])
-        self.assertNotIn("fire_modes", self.schema["required"])
 
 
 class EveryItemSchemaTest(unittest.TestCase):

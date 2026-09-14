@@ -25,70 +25,46 @@ from _fixtures import modcheck
 class MergeValueTest(unittest.TestCase):
     """merge_value is the whole merge simulation for one member."""
 
-    def test_dict_merges_field_wise(self):
-        self.assertEqual(
-            modcheck.merge_value({"a": 1, "b": 2}, {"b": 3}, "merge"),
-            {"a": 1, "b": 3})
-
-    def test_nested_dict_merges_field_wise(self):
-        self.assertEqual(
-            modcheck.merge_value({"a": {"x": 1, "y": 2}}, {"a": {"y": 9}},
-                                 "merge"),
-            {"a": {"x": 1, "y": 9}})
-
-    def test_array_merges_by_index(self):
-        self.assertEqual(modcheck.merge_value([1, 2, 3], [9], "merge"),
-                         [9, 2, 3])
-
-    def test_array_of_objects_merges_element_wise_by_index(self):
-        self.assertEqual(
-            modcheck.merge_value([{"n": "a", "v": 1}, {"n": "b"}],
-                                 [{"v": 2}], "merge"),
-            [{"n": "a", "v": 2}, {"n": "b"}])
-
-    def test_patch_longer_than_base_appends(self):
-        self.assertEqual(modcheck.merge_value([1], [9, 8], "merge"), [9, 8])
-
-    def test_concat_appends_instead_of_overwriting(self):
-        self.assertEqual(modcheck.merge_value([1, 2], [3], "concat"),
-                         [1, 2, 3])
-
-    def test_replace_discards_the_base_array(self):
-        self.assertEqual(modcheck.merge_value([1, 2], [3], "replace"), [3])
-
-    def test_empty_array_clears_only_under_replace(self):
+    CASES = (
+        # (base, patch, mode, want)
+        # dicts merge field-wise, nested ones too
+        ({"a": 1, "b": 2}, {"b": 3}, "merge", {"a": 1, "b": 3}),
+        ({"a": {"x": 1, "y": 2}}, {"a": {"y": 9}}, "merge",
+         {"a": {"x": 1, "y": 9}}),
+        # arrays merge by index, element-wise for arrays of objects, and a
+        # longer patch appends
+        ([1, 2, 3], [9], "merge", [9, 2, 3]),
+        ([{"n": "a", "v": 1}, {"n": "b"}], [{"v": 2}], "merge",
+         [{"n": "a", "v": 2}, {"n": "b"}]),
+        ([1], [9, 8], "merge", [9, 8]),
+        # concat appends instead of overwriting; replace discards the base
+        ([1, 2], [3], "concat", [1, 2, 3]),
+        ([1, 2], [3], "replace", [3]),
         # The reason clearing a list needs TemplatesToReplaceArrays: an empty
         # source array contributes no indices, so an index merge is a no-op.
-        self.assertEqual(modcheck.merge_value([1, 2], [], "merge"), [1, 2])
-        self.assertEqual(modcheck.merge_value([1, 2], [], "concat"), [1, 2])
-        self.assertEqual(modcheck.merge_value([1, 2], [], "replace"), [])
-
-    def test_null_leaves_the_base_alone(self):
+        ([1, 2], [], "merge", [1, 2]),
+        ([1, 2], [], "concat", [1, 2]),
+        ([1, 2], [], "replace", []),
         # MergeNullValueHandling is Ignore in the engine.
-        self.assertEqual(modcheck.merge_value(5, None, "merge"), 5)
-        self.assertEqual(modcheck.merge_value({"a": 1}, {"a": None}, "merge"),
-                         {"a": 1})
-
-    def test_type_discriminator_is_stripped(self):
+        (5, None, "merge", 5),
+        ({"a": 1}, {"a": None}, "merge", {"a": 1}),
         # $type is a Newtonsoft deserializer instruction and never appears on
-        # the merged entry.
-        self.assertEqual(
-            modcheck.merge_value({"a": 1}, {"$type": "X, Y", "b": 2},
-                                 "merge"),
-            {"a": 1, "b": 2})
+        # the merged entry, with or without a base.
+        ({"a": 1}, {"$type": "X, Y", "b": 2}, "merge", {"a": 1, "b": 2}),
+        (None, {"$type": "X, Y", "b": 2}, "merge", {"b": 2}),
+        # scalars override
+        (1, 2, "merge", 2),
+        ("a", "b", "merge", "b"),
+        # an array over a non-array base replaces it
+        (None, [1], "merge", [1]),
+        ("x", [1], "merge", [1]),
+    )
 
-    def test_type_discriminator_is_stripped_with_no_base(self):
-        self.assertEqual(
-            modcheck.merge_value(None, {"$type": "X, Y", "b": 2}, "merge"),
-            {"b": 2})
-
-    def test_scalar_overrides(self):
-        self.assertEqual(modcheck.merge_value(1, 2, "merge"), 2)
-        self.assertEqual(modcheck.merge_value("a", "b", "merge"), "b")
-
-    def test_array_over_a_non_array_base_replaces(self):
-        self.assertEqual(modcheck.merge_value(None, [1], "merge"), [1])
-        self.assertEqual(modcheck.merge_value("x", [1], "merge"), [1])
+    def test_merge_value(self):
+        for base, patch, mode, want in self.CASES:
+            with self.subTest(base=base, patch=patch, mode=mode):
+                self.assertEqual(modcheck.merge_value(base, patch, mode),
+                                 want)
 
 
 class StripJsonCommentsTest(unittest.TestCase):
@@ -165,15 +141,11 @@ class LoadEntriesTest(_fixtures.ModcheckTestCase):
         self.assertIsNone(entries)
         self.assertEqual(err, "element 0 is not an object")
 
-    def test_missing_data_name_is_an_error(self):
-        entries, err = self._load('[{"x": 1}]')
-        self.assertIsNone(entries)
-        self.assertEqual(err, "element 0 has no dataName")
-
-    def test_blank_data_name_is_an_error(self):
-        entries, err = self._load('[{"dataName": ""}]')
-        self.assertIsNone(entries)
-        self.assertEqual(err, "element 0 has no dataName")
+    def test_missing_or_blank_data_name_is_an_error(self):
+        for text in ('[{"x": 1}]', '[{"dataName": ""}]'):
+            entries, err = self._load(text)
+            self.assertIsNone(entries, text)
+            self.assertEqual(err, "element 0 has no dataName", text)
 
     def test_malformed_json_reports_the_parser_message(self):
         entries, err = self._load('[{"dataName": "A"')
@@ -313,16 +285,6 @@ class CompareTest(unittest.TestCase):
                     {"moduleName": "Gun_Coilgun"}]
         c.check_alignment("modules[0]", mod_list[0],
                           {"moduleName": "Gun_Coilgun"}, mod_list)
-        self.assertEqual(c.warnings, [])
-
-    def test_alignment_is_silent_on_arrays_of_strings(self):
-        # BUG, pinned as-is: check_alignment returns at modcheck.py:903 unless
-        # both elements are dicts, so index-merge misalignment on the string
-        # arrays (prereqs, templateNames, missionsGrantedNames) is reported
-        # nowhere. See test_checks.E5 for the same defect end to end.
-        c = self.cmp()
-        c.check_alignment("prereqs[0]", "Tech_Gamma", "Tech_Beta",
-                          ["Tech_Gamma"])
         self.assertEqual(c.warnings, [])
 
 

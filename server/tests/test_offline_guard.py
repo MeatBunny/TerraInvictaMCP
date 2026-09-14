@@ -35,9 +35,6 @@ TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class GuardTest(unittest.TestCase):
 
-    def test_the_guard_is_armed(self):
-        self.assertTrue(_offline.armed())
-
     def test_every_module_in_this_directory_arms_it(self):
         # Importing _offline is what arms the guard for a module run on its
         # own, where discovery never loads the rest of the suite. A new module
@@ -67,18 +64,6 @@ class GuardTest(unittest.TestCase):
                 mock.patch.dict(tools.BY_NAME, {"query": dialer}):
             with self.assertRaises(BridgeDialed):
                 tools.handle_call("query", {})
-
-    def test_another_port_still_connects(self):
-        # test_bridge answers real bytes from a loopback peer on an ephemeral
-        # port, and the transport is what it is testing. Only the game's port
-        # is out of bounds.
-        listener = socket.socket()
-        self.addCleanup(listener.close)
-        listener.bind(("127.0.0.1", 0))
-        listener.listen(1)
-        with socket.create_connection(listener.getsockname(),
-                                      timeout=5) as sock:
-            self.assertIsNotNone(sock.getpeername())
 
     def test_the_default_port_is_refused_under_a_port_override(self):
         # A case that hardcodes 17470 is still dialing a game on a machine

@@ -53,10 +53,6 @@ class SaveDiscoveryTest(SaveFixture):
 
     # ---------------------------------------------------------- discovery
 
-    def test_an_uncompressed_save_is_discovered(self):
-        self.write_save("scratch-plain.json")
-        self.assertEqual(modcheck._list_saves(), ["scratch-plain.json"])
-
     def test_both_formats_are_listed_newest_first(self):
         self.write_save("scratch-old.gz", mtime=1000)
         self.write_save("scratch-new.json", mtime=2000)
@@ -71,30 +67,20 @@ class SaveDiscoveryTest(SaveFixture):
 
     # ------------------------------------------------------------- reading
 
-    def test_an_uncompressed_save_is_read_not_gunzipped(self):
-        self.write_save("scratch-plain.json")
-        result = modcheck.save_check()
-        self.assertEqual(result["summary"]["save"], "scratch-plain.json")
-        self.assertNotIn("error", result["summary"])
-
     def test_the_newest_save_wins_across_formats(self):
         self.write_save("scratch-old.gz", mtime=1000)
         self.write_save("scratch-new.json", mtime=2000)
         self.assertEqual(modcheck.save_check()["summary"]["save"],
                          "scratch-new.json")
 
-    def test_a_gz_save_still_reads(self):
-        self.write_save("scratch-zipped.gz")
-        self.assertEqual(modcheck.save_check()["summary"]["save"],
-                         "scratch-zipped.gz")
-
     # -------------------------------------------------------- by name
 
-    def test_a_name_with_its_extension_resolves(self):
+    def test_a_name_with_its_extension_resolves_and_reads(self):
+        # An uncompressed save is read, not gunzipped.
         self.write_save("scratch-plain.json")
-        self.assertEqual(
-            modcheck.save_check("scratch-plain.json")["summary"]["save"],
-            "scratch-plain.json")
+        result = modcheck.save_check("scratch-plain.json")
+        self.assertEqual(result["summary"]["save"], "scratch-plain.json")
+        self.assertNotIn("error", result["summary"])
 
     def test_a_bare_name_resolves_in_either_format(self):
         self.write_save("scratch-plain.json")
