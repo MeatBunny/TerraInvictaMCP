@@ -41,7 +41,7 @@ namespace TerraInvictaMCP
         // that no longer exist.
         static bool OnUnload(UnityModManager.ModEntry modEntry)
         {
-            AiControl.ReleaseForUnload();
+            try { AiControl.Release("released on unload"); } catch (Exception) { }
             try { Server.Stop(); }
             catch (Exception e) { Server.LastError = e.Message; }
             if (harmony != null)
@@ -76,7 +76,7 @@ namespace TerraInvictaMCP
                 // Releasing first: a mod switched off while engaged would leave the
                 // faction AI-driven with no listener left to take it back. Saves
                 // stay safe either way, but that is a trap, not a design.
-                AiControl.ReleaseForUnload();
+                try { AiControl.Release("released on unload"); } catch (Exception) { }
                 try { Server.Stop(); }
                 catch (Exception e) { Server.LastError = e.Message; }
             }

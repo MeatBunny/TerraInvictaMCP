@@ -153,7 +153,7 @@ namespace TerraInvictaMCP
         // that half-completes must never leave the faction AI-flagged with the
         // postfix still narrowing isActivePlayer, which is the state QA saw and
         // could only escape with a save reload.
-        static JToken Release(string note)
+        internal static JToken Release(string note)
         {
             if (!engaged) return Status(note == null ? null : "not engaged");
 
@@ -175,7 +175,9 @@ namespace TerraInvictaMCP
             }
 
             // 3. Give the notification pipeline back whatever it had.
-            RestoreNotifications(released);
+            if (priorNotifications.captured && released != null)
+                RestoreNotificationValues(released, priorNotifications);
+            priorNotifications = new Notifications();
 
             faction = null;
             campaign = null;
@@ -253,17 +255,6 @@ namespace TerraInvictaMCP
             catch (Exception e) { Server.LastError = Verbs.Note(e); }
         }
 
-        static void RestoreNotifications(TIFactionState target)
-        {
-            if (!priorNotifications.captured || target == null)
-            {
-                priorNotifications = new Notifications();
-                return;
-            }
-            RestoreNotificationValues(target, priorNotifications);
-            priorNotifications = new Notifications();
-        }
-
         // Status is the one call that has to answer in every state, including
         // after a crash, so nothing in it is allowed to throw.
         static string FactionName()
@@ -300,17 +291,11 @@ namespace TerraInvictaMCP
             catch (Exception) { return false; }
         }
 
-        // Autopilot.Start assigns the singleton, so the field is the cheap path and
-        // the scene walk is the fallback for a frame before Start has run.
+        // Autopilot.Start assigns the singleton, so it is null only before the
+        // component has started, when Activated is false anyway.
         static Autopilot Macro()
         {
-            try
-            {
-                Autopilot macro = Autopilot.Singleton;
-                if (macro != null) return macro;
-            }
-            catch (Exception) { }
-            try { return UnityEngine.Object.FindObjectOfType<Autopilot>(true); }
+            try { return Autopilot.Singleton; }
             catch (Exception) { return null; }
         }
 
@@ -512,23 +497,6 @@ namespace TerraInvictaMCP
         internal static void ResetMissionPhaseCollisions()
         {
             missionPhaseCollisions = 0;
-        }
-
-        // Called from OnUnload. The assembly is about to be replaced, so anything
-        // still held has to come back now.
-        internal static void ReleaseForUnload()
-        {
-            try { Release("released on unload"); }
-            catch (Exception) { }
-        }
-
-        // Called when the campaign the engagement is bound to is being unloaded
-        // on purpose (game.main_menu). The patches read one faction of one
-        // campaign, and that campaign's states are about to be cleared.
-        internal static void ReleaseForCampaignEnd()
-        {
-            try { Release("released on return to the main menu"); }
-            catch (Exception) { }
         }
 
         // ---- patch installation ----------------------------------------------
@@ -873,15 +841,11 @@ namespace TerraInvictaMCP
         // action=engage|release|status; engage takes smart=campaign|brutal.
         static JToken AiControl_Verb(JObject args)
         {
-            // Str returns null for an absent key, not "": release and status carry
-            // no smart argument, so reading .Length here threw before the verb body
-            // ever ran, which is why both actions NREd in every state while engage
-            // (which always sends smart) worked.
-            string action = Text(args, "action", "status");
+            string action = Str(args, "action") ?? "status";
             // Brutal by default: the point of the engagement is an unattended run
             // that gets somewhere, so it plays as well as it can unless the caller
             // asks for the campaign's own difficulty.
-            string smart = Text(args, "smart", "brutal");
+            string smart = Str(args, "smart") ?? "brutal";
             return AiControl.Control(action, smart);
         }
 
@@ -890,12 +854,6 @@ namespace TerraInvictaMCP
         static JToken QueryAutopilot(JObject args)
         {
             return AiControl.MacroStatus();
-        }
-
-        static string Text(JObject args, string key, string fallback)
-        {
-            string value = Str(args, key);
-            return string.IsNullOrEmpty(value) ? fallback : value;
         }
     }
 }

@@ -55,7 +55,8 @@ namespace TerraInvictaMCP
             }
             catch (Exception)
             {
-                for (int i = 0; i < ships.Count; i++) Discard(ships[i]);
+                for (int i = 0; i < ships.Count; i++)
+                    DiscardState<TISpaceShipState>(ships[i]);
                 throw;
             }
 
@@ -96,16 +97,6 @@ namespace TerraInvictaMCP
             o["shipsTotal"] = total >= 0 ? (JToken)new JValue(total) : JValue.CreateNull();
             if (total >= 0 && total != ships.Count) o["merged"] = true;
             return o;
-        }
-
-        // Archived without the event: the ship was never announced to anything, so there is
-        // nothing that wants to hear it go.
-        static void Discard(TISpaceShipState ship)
-        {
-            try { ship.ArchiveState(false); }
-            catch (Exception) { }
-            try { GameStateManager.RemoveGameState<TISpaceShipState>(ship.ID, false); }
-            catch (Exception) { }
         }
 
         // CreateAtRunTime asks the location exactly two questions when parentFleet is

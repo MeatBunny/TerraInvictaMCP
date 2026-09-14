@@ -169,7 +169,8 @@ namespace TerraInvictaMCP
             // The engagement patches isActivePlayer for one faction of one
             // campaign. That campaign is about to stop existing.
             o["aiControlReleased"] = AiControl.Engaged;
-            AiControl.ReleaseForCampaignEnd();
+            try { AiControl.Release("released on return to the main menu"); }
+            catch (Exception) { }
             // The latched seat belongs to the campaign being unloaded. The tick
             // latches the next one when a campaign is up again.
             ForgetSeat();

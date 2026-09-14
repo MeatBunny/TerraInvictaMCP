@@ -69,11 +69,11 @@ namespace TerraInvictaMCP
             string powerPlant = RequiredText(args, "power_plant");
             string radiator = RequiredText(args, "radiator");
             int tanks = Int(args, "tanks");
-            ShipRole role = ParseRole(RequiredText(args, "role"));
+            ShipRole role = ParseEnum<ShipRole>(RequiredText(args, "role"), "role");
             bool save = Bool(args, "save", true);
             bool legal = Bool(args, "legal", true);
 
-            JObject armor = ObjectArg(args, "armor");
+            JObject armor = args != null ? args["armor"] as JObject : null;
             if (armor == null)
                 throw new VerbError("arg 'armor' is required: an object with "
                     + "'nose', 'lateral' and 'tail', each {material, value}. Every "
@@ -377,7 +377,7 @@ namespace TerraInvictaMCP
                         + "object {slot, mode}. Nothing was created");
                 var entry = new FireModeDataTemplateEntry();
                 entry.slot = Int(e, "slot");
-                entry.fireMode = ParseFireMode(RequiredText(e, "mode"));
+                entry.fireMode = ParseEnum<FireMode>(RequiredText(e, "mode"), "fire mode");
                 list.Add(entry);
             }
             return list;
@@ -525,19 +525,17 @@ namespace TerraInvictaMCP
         // names a failed predicate. Null when every entry survived.
         static string DropFailure(JArray modules, JArray nose, JArray hull)
         {
-            string why = FirstDrop(modules, "module");
-            if (why != null) return why;
-            why = FirstDrop(nose, "noseWeapon");
-            if (why != null) return why;
-            return FirstDrop(hull, "hullWeapon");
-        }
-
-        static string FirstDrop(JArray dropped, string where)
-        {
-            if (dropped == null || dropped.Count == 0) return null;
-            JObject o = dropped[0] as JObject;
-            if (o == null) return where + " dropped";
-            return "dropped " + where + "[" + o["index"] + "] '" + o["name"] + "'";
+            var lists = new JArray[] { modules, nose, hull };
+            var where = new string[] { "module", "noseWeapon", "hullWeapon" };
+            for (int i = 0; i < lists.Length; i++)
+            {
+                if (lists[i] == null || lists[i].Count == 0) continue;
+                JObject o = lists[i][0] as JObject;
+                if (o == null) return where[i] + " dropped";
+                return "dropped " + where[i] + "[" + o["index"] + "] '"
+                    + o["name"] + "'";
+            }
+            return null;
         }
 
         // The four tests the engine's own getter applies, in its order. Null
@@ -593,24 +591,21 @@ namespace TerraInvictaMCP
                 delegate { return design.lateralArmorTemplate; }, null));
             AddIfIllegal(a, faction, "tailArmor", Safe<TIShipPartTemplate>(
                 delegate { return design.tailArmorTemplate; }, null));
-            AddEntriesIfIllegal(a, faction, "module", modules);
-            AddEntriesIfIllegal(a, faction, "noseWeapon", noseWeapons);
-            AddEntriesIfIllegal(a, faction, "hullWeapon", hullWeapons);
+            AddEntriesIfIllegal(a, faction, "module", modules, false);
+            AddEntriesIfIllegal(a, faction, "noseWeapon", noseWeapons, true);
+            AddEntriesIfIllegal(a, faction, "hullWeapon", hullWeapons, true);
             return a;
         }
 
         static void AddEntriesIfIllegal(JArray a, TIFactionState faction,
-            string where, List<ModuleDataTemplateEntry> entries)
+            string where, List<ModuleDataTemplateEntry> entries, bool weapon)
         {
             for (int i = 0; i < entries.Count; i++)
             {
                 string name = entries[i].moduleName;
                 if (string.IsNullOrEmpty(name)) continue;
                 if (string.Equals(name, "Empty", StringComparison.Ordinal)) continue;
-                TIShipPartTemplate part = Safe<TIShipPartTemplate>(delegate
-                {
-                    return TemplateManager.Find<TIShipPartTemplate>(name, true);
-                }, null);
+                TIShipPartTemplate part = ResolvePart(name, weapon);
                 // A name that resolves to nothing is a validity or drop problem,
                 // and both are already reported; calling it illegal too would name
                 // one fault twice.
@@ -1007,7 +1002,7 @@ namespace TerraInvictaMCP
         static JToken DesignAuto(JObject args)
         {
             TIFactionState faction = Arg<TIFactionState>(args, "faction");
-            ShipRole role = ParseRole(RequiredText(args, "role"));
+            ShipRole role = ParseEnum<ShipRole>(RequiredText(args, "role"), "role");
             float range = Float(args, "range_au", 1f);
             bool exotics = Bool(args, "exotics", false);
             bool antimatter = Bool(args, "antimatter", false);
@@ -1084,39 +1079,20 @@ namespace TerraInvictaMCP
 
         #region shared
 
-        static ShipRole ParseRole(string wanted)
+        // By name, case-insensitively. Enum.Parse also takes any number, defined
+        // or not, so IsDefined gates it the way Actions.cs does.
+        static T ParseEnum<T>(string wanted, string label) where T : struct
         {
-            string s = wanted.Trim();
-            var values = (ShipRole[])Enum.GetValues(typeof(ShipRole));
-            for (int i = 0; i < values.Length; i++)
+            try
             {
-                if (string.Equals(values[i].ToString(), s,
-                                  StringComparison.OrdinalIgnoreCase))
-                    return values[i];
+                object parsed = Enum.Parse(typeof(T), wanted.Trim(), true);
+                if (Enum.IsDefined(typeof(T), parsed)) return (T)parsed;
             }
-            throw new VerbError("unknown role '" + wanted + "'; ShipRole is "
-                + Names(values) + ". Nothing was created");
-        }
-
-        static FireMode ParseFireMode(string wanted)
-        {
-            string s = wanted.Trim();
-            var values = (FireMode[])Enum.GetValues(typeof(FireMode));
-            for (int i = 0; i < values.Length; i++)
-            {
-                if (string.Equals(values[i].ToString(), s,
-                                  StringComparison.OrdinalIgnoreCase))
-                    return values[i];
-            }
-            throw new VerbError("unknown fire mode '" + wanted + "'; FireMode is "
-                + Names(values) + ". Nothing was created");
-        }
-
-        static string Names(Array values)
-        {
-            var parts = new List<string>();
-            foreach (object v in values) parts.Add(v.ToString());
-            return string.Join(", ", parts.ToArray());
+            catch (Exception) { }
+            throw new VerbError("unknown " + label + " '" + wanted + "'; "
+                + typeof(T).Name + " is "
+                + string.Join(", ", Enum.GetNames(typeof(T)))
+                + ". Nothing was created");
         }
 
         static string RequiredText(JObject args, string key)
@@ -1126,17 +1102,6 @@ namespace TerraInvictaMCP
                 throw new VerbError("arg '" + key + "' is required; nothing was "
                     + "created");
             return s.Trim();
-        }
-
-        static JObject ObjectArg(JObject args, string key)
-        {
-            JToken t = args != null ? args[key] : null;
-            if (t == null || t.Type == JTokenType.Null) return null;
-            JObject o = t as JObject;
-            if (o == null)
-                throw new VerbError("arg '" + key + "' must be an object; nothing "
-                    + "was created");
-            return o;
         }
 
         #endregion

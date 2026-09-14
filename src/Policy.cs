@@ -667,39 +667,7 @@ namespace TerraInvictaMCP
         // exists) has no id worth quoting.
         static TINationState ArgNation(JObject args, string key)
         {
-            JToken t = args != null ? args[key] : null;
-            if (t == null || t.Type == JTokenType.Null)
-                throw new VerbError("missing arg '" + key + "'");
-            string name = (t.Type == JTokenType.String ? (string)t : t.ToString()).Trim();
-            int id;
-            if (int.TryParse(name, NumberStyles.Integer, CultureInfo.InvariantCulture, out id))
-                return ById<TINationState>(id);
-            if (name.Length == 0) throw new VerbError("arg '" + key + "' is empty");
-            var byData = new List<TINationState>();
-            var byDisplay = new List<TINationState>();
-            foreach (TINationState nation in GameStateManager.IterateByClass<TINationState>(false))
-            {
-                if (nation == null) continue;
-                if (Same(Safe<string>(delegate { return nation.templateName; }, null), name))
-                {
-                    byData.Add(nation);
-                    continue;
-                }
-                if (Same(StateName(nation), name)
-                    || Same(Safe<string>(delegate { return nation.displayName; }, null), name))
-                    byDisplay.Add(nation);
-            }
-            List<TINationState> hits = byData.Count > 0 ? byData : byDisplay;
-            if (hits.Count == 1) return hits[0];
-            if (hits.Count == 0)
-                throw new VerbError("no nation matches '" + name
-                    + "'; names and ids come from query.nations");
-            var listed = new List<string>();
-            for (int i = 0; i < hits.Count && i < MaxPolicyNamesListed; i++)
-                listed.Add(StateName(hits[i]) + " (" + (int)hits[i].ID + ")");
-            throw new VerbError("'" + name + "' matches " + hits.Count
-                + " nations: " + string.Join(", ", listed.ToArray())
-                + "; pass a state id instead");
+            return ArgState<TINationState>(args, key, key);
         }
 
         #endregion

@@ -622,7 +622,7 @@ namespace TerraInvictaMCP
         // one and the new state orphaned in the manager.
         static JToken SpawnAlienSite(JObject args)
         {
-            TIRegionState region = ArgRegion(args);
+            TIRegionState region = ArgState<TIRegionState>(args, "region", "region_name");
             string kind = Str(args, "kind");
             if (string.IsNullOrEmpty(kind)) throw new VerbError("missing arg 'kind'");
 
@@ -707,62 +707,70 @@ namespace TerraInvictaMCP
             return holder;
         }
 
-        // Regions listed in a refusal before the list is cut.
-        const int MaxRegionsListed = 12;
-
-        // A region by state id or by name. The id is the addressable form and stays
-        // the primary one, but nothing hands a caller a region id: the interesting
-        // regions are named ones out of a nation, and finding the id first meant a
-        // query.state walk before every call. 'region_name' matches the region's
-        // templateName (its dataName) first and its display name second, so a
-        // dataName always wins over a localized string that happens to collide.
-        static TIRegionState ArgRegion(JObject args)
-        {
-            JToken id = args != null ? args["region"] : null;
-            if (id != null && id.Type != JTokenType.Null)
-                return Arg<TIRegionState>(args, "region");
-
-            string wanted = Str(args, "region_name");
-            if (wanted != null) wanted = wanted.Trim();
-            if (string.IsNullOrEmpty(wanted))
-                throw new VerbError("missing arg 'region': a TIRegionState id, or "
-                    + "'region_name' as the region's dataName or display name");
-
-            var byData = new List<TIRegionState>();
-            var byDisplay = new List<TIRegionState>();
-            foreach (TIRegionState r in
-                     GameStateManager.IterateByClass<TIRegionState>(false))
-            {
-                if (r == null) continue;
-                if (Same(r.templateName, wanted)) byData.Add(r);
-                else if (Same(StateName(r), wanted)) byDisplay.Add(r);
-            }
-            List<TIRegionState> found = byData.Count > 0 ? byData : byDisplay;
-            if (found.Count == 1) return found[0];
-            if (found.Count == 0)
-                throw new VerbError("no region whose dataName or display name is '"
-                    + wanted + "'");
-            // Two regions can share a display name across nations, and picking one
-            // would silently spawn the site in the wrong country.
-            throw new VerbError("'" + wanted + "' matches " + found.Count
-                + " regions; pass 'region' as a state id instead: "
-                + RegionIds(found));
-        }
-
-        static string RegionIds(List<TIRegionState> regions)
-        {
-            var rows = new List<string>();
-            int n = regions.Count < MaxRegionsListed ? regions.Count
-                                                    : MaxRegionsListed;
-            for (int i = 0; i < n; i++)
-                rows.Add((int)regions[i].ID + "=" + regions[i].templateName);
-            return string.Join(", ", rows.ToArray())
-                + (regions.Count > n ? ", ..." : "");
-        }
-
         #endregion
 
         #region Shared helpers
+
+        // States listed in an ambiguity refusal before the list is cut.
+        const int MaxStatesListed = 12;
+
+        // A state by id or by name, for the verbs that take either. The id is the
+        // addressable form and stays the primary one, but nothing hands a caller a
+        // region id and few callers hold a nation id: the interesting states are
+        // named ones, and finding the id first meant a query.state walk before every
+        // call. 'nameKey' is the argument carrying the name, and is 'key' itself when
+        // one argument takes both (a whole number is then the id). The name matches
+        // templateName (the dataName) first and the display name second, so a
+        // dataName always wins over a localized string that happens to collide.
+        static T ArgState<T>(JObject args, string key, string nameKey)
+            where T : TIGameState
+        {
+            JToken t = args != null ? args[key] : null;
+            string wanted = null;
+            if (t != null && t.Type != JTokenType.Null)
+            {
+                // A separate name argument means this one is the id and nothing else.
+                if (nameKey != key) return Arg<T>(args, key);
+                int id;
+                wanted = (t.Type == JTokenType.String ? (string)t : t.ToString()).Trim();
+                if (int.TryParse(wanted, NumberStyles.Integer,
+                                 CultureInfo.InvariantCulture, out id))
+                    return ById<T>(id);
+            }
+            else if (nameKey != key)
+            {
+                wanted = Str(args, nameKey);
+                if (wanted != null) wanted = wanted.Trim();
+            }
+            if (string.IsNullOrEmpty(wanted))
+                throw new VerbError("missing arg '" + key + "': a " + typeof(T).Name
+                    + " id, or " + (nameKey == key ? "its" : "'" + nameKey + "' as its")
+                    + " dataName or display name");
+
+            var byData = new List<T>();
+            var byDisplay = new List<T>();
+            foreach (T state in GameStateManager.IterateByClass<T>(false))
+            {
+                if (state == null) continue;
+                if (Same(state.templateName, wanted)) byData.Add(state);
+                else if (Same(StateName(state), wanted)
+                         || Same(state.displayName, wanted)) byDisplay.Add(state);
+            }
+            List<T> found = byData.Count > 0 ? byData : byDisplay;
+            if (found.Count == 1) return found[0];
+            if (found.Count == 0)
+                throw new VerbError("no " + typeof(T).Name
+                    + " whose dataName or display name is '" + wanted + "'");
+            // Two states can share a display name, and picking one would silently
+            // act on the wrong country.
+            var rows = new List<string>();
+            for (int i = 0; i < found.Count && i < MaxStatesListed; i++)
+                rows.Add((int)found[i].ID + "=" + found[i].templateName);
+            throw new VerbError("'" + wanted + "' matches " + found.Count + " "
+                + typeof(T).Name + " (" + string.Join(", ", rows.ToArray())
+                + (found.Count > MaxStatesListed ? ", ..." : "")
+                + "); pass '" + key + "' as a state id instead");
+        }
 
         // Rollback for a state that was registered and then failed to initialize.
         // Archived without the event, as spawn.fleet does: the state was never

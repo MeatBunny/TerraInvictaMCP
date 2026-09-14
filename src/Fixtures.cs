@@ -29,7 +29,6 @@ namespace TerraInvictaMCP
         class NationStat
         {
             public string name;
-            public string reason;
             public float min;
             public float max;
             public Func<TINationState, float> read;
@@ -41,48 +40,35 @@ namespace TerraInvictaMCP
         static List<NationStat> BuildNationStats()
         {
             var list = new List<NationStat>();
-            list.Add(Stat("cohesion", "CohesionReason_Effect", 0f, 10f,
-                delegate(TINationState n) { return n.cohesion; },
-                delegate(TINationState n, float d)
+            list.Add(new NationStat { name = "cohesion", min = 0f, max = 10f,
+                read = delegate(TINationState n) { return n.cohesion; },
+                add = delegate(TINationState n, float d)
                 {
                     n.AddToCohesion(d,
                         TINationState.CohesionChangeReason.CohesionReason_Effect);
-                }));
-            list.Add(Stat("democracy", "DemReason_EventEffect", 0f, 10f,
-                delegate(TINationState n) { return n.democracy; },
-                delegate(TINationState n, float d)
+                } });
+            list.Add(new NationStat { name = "democracy", min = 0f, max = 10f,
+                read = delegate(TINationState n) { return n.democracy; },
+                add = delegate(TINationState n, float d)
                 {
                     n.AddToDemocracy(d,
                         TINationState.DemocracyChangeReason.DemReason_EventEffect);
-                }));
-            list.Add(Stat("inequality", "InqReason_EventEffects", 1f, 9f,
-                delegate(TINationState n) { return n.inequality; },
-                delegate(TINationState n, float d)
+                } });
+            list.Add(new NationStat { name = "inequality", min = 1f, max = 9f,
+                read = delegate(TINationState n) { return n.inequality; },
+                add = delegate(TINationState n, float d)
                 {
                     n.AddToInequality(d,
                         TINationState.InequalityChangeReason.InqReason_EventEffects);
-                }));
-            list.Add(Stat("education", "EducationReason_EventEffect", 1f, 255f,
-                delegate(TINationState n) { return n.education; },
-                delegate(TINationState n, float d)
+                } });
+            list.Add(new NationStat { name = "education", min = 1f, max = 255f,
+                read = delegate(TINationState n) { return n.education; },
+                add = delegate(TINationState n, float d)
                 {
                     n.AddToEducation(d,
                         TINationState.EducationChangeReason.EducationReason_EventEffect);
-                }));
+                } });
             return list;
-        }
-
-        static NationStat Stat(string name, string reason, float min, float max,
-            Func<TINationState, float> read, Action<TINationState, float> add)
-        {
-            var s = new NationStat();
-            s.name = name;
-            s.reason = reason;
-            s.min = min;
-            s.max = max;
-            s.read = read;
-            s.add = add;
-            return s;
         }
 
         // Stats the debug console already reaches. This verb refuses them and
@@ -141,7 +127,6 @@ namespace TerraInvictaMCP
             // re-clamps after adding, so the stat itself is the only truth.
             o["after"] = Safe<JToken>(
                 delegate { return Num(stat.read(nation)); }, JValue.CreateNull());
-            o["reason"] = stat.reason;
             o["range"] = Range(stat);
             o["stats"] = after;
             // Nothing else should have moved: the range check above keeps both
@@ -328,17 +313,11 @@ namespace TerraInvictaMCP
             //
             // Taken before anything below changes state, and every refusal that
             // reads it is made before the DestroyModule call.
-            int okayBefore = ModuleCount(hab, true);
-            // Unreadable rather than zero. ModuleCount answers -1 when the read
-            // threw, and every refusal below is a test against 1; letting an
-            // unknown count fall through would run exactly the calls those
-            // refusals exist to stop.
-            if (okayBefore < 0)
-                throw new VerbError("hab " + (int)hab.ID + " would not report its "
-                    + "okay modules, so whether module " + (int)module.ID + " is "
-                    + "its last one is unknown -- and that is the case that takes "
-                    + "the hab down. Refused rather than guessed. Nothing was "
-                    + "changed; read the hab with query.state");
+            // Unguarded on purpose: a hab that will not report its okay modules
+            // leaves the last-module question unanswerable, and every refusal below
+            // tests against 1. The throw reaches the verb's catch-all with nothing
+            // changed yet.
+            int okayBefore = hab.OkayModules().Count;
 
             // Whether the engine will actually destroy anything on this call.
             // Under the engine's own refusal it returns false at IL_005d having
