@@ -110,21 +110,15 @@ class SaveDiscoveryTest(SaveFixture):
 
 
 class SavesResourceTest(SaveFixture):
-    """ti://saves falls back to the folder when the game is down."""
+    """ti://saves lists the folder, newest first, in both formats."""
 
     def listing(self):
-        with mock.patch.object(resources.bridge, "SAVES_DIR",
-                               modcheck.SAVES_DIR), \
-                mock.patch.object(resources.bridge, "call",
-                                  side_effect=resources.bridge.BridgeError(
-                                      "no game")):
-            return json.loads(resources._saves_listing())
+        return json.loads(resources._saves_listing())
 
     def test_both_formats_are_listed(self):
         self.write_save("scratch-old.gz", mtime=1000)
         self.write_save("scratch-new.json", mtime=2000)
         listing = self.listing()
-        self.assertEqual(listing["source"], "saves directory (game down)")
         self.assertEqual([(s["name"], s["extension"])
                           for s in listing["saves"]],
                          [("scratch-new", ".json"), ("scratch-old", ".gz")])

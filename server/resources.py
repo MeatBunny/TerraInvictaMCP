@@ -6,6 +6,7 @@ import json
 import os
 
 import bridge
+import modcheck
 
 DOCS = os.path.join(bridge.MOD_DIR, "docs")
 TEMPLATES_DIR = os.path.join(bridge.GAME_ROOT, "TerraInvicta_Data",
@@ -23,8 +24,7 @@ RESOURCES = [
      "Template classes the template tool accepts, from the game's Templates "
      "directory"),
     ("ti://saves", "Save listing", "application/json",
-     "Saved games with timestamps (from the bridge when up, the on-disk "
-     "saves directory otherwise)"),
+     "Saved games with timestamps, from the on-disk saves directory"),
     ("ti://logs/game", "Game log tail", "text/plain",
      "Tail of Logs/TerraInvicta.log: template registration, mod merge, save "
      "messages"),
@@ -61,37 +61,17 @@ def _templates_index():
 
 
 def _saves_listing():
-    try:
-        data = bridge.call("saves.list")
-        return json.dumps({"source": "bridge", "saves": data}, indent=2,
-                          default=str)
-    except (bridge.BridgeError, bridge.VerbError):
-        pass
     saves = []
-    try:
-        for f in os.listdir(bridge.SAVES_DIR):
-            # Both formats the game writes, matching the bridge's own listing
-            # (SaveExtensions in src/Verbs.cs): a profile setting decides
-            # which one a campaign is saved in, and the fallback that reads
-            # only .gz reports an empty folder full of saves.
-            name, ext = os.path.splitext(f)
-            if ext not in (".gz", ".json"):
-                continue
-            path = os.path.join(bridge.SAVES_DIR, f)
-            saves.append({
-                "name": name,
-                # Carried because the name alone is ambiguous once both
-                # formats are listed, and because the bridge's own listing
-                # carries it.
-                "extension": ext,
-                "modified": datetime.datetime.fromtimestamp(
-                    os.path.getmtime(path)).isoformat(timespec="seconds"),
-                "bytes": os.path.getsize(path)})
-    except OSError as e:
-        return json.dumps({"error": str(e), "dir": bridge.SAVES_DIR})
-    saves.sort(key=lambda x: x["modified"], reverse=True)
-    return json.dumps({"source": "saves directory (game down)",
-                       "saves": saves}, indent=2)
+    for f in modcheck._list_saves():
+        name, ext = os.path.splitext(f)
+        path = os.path.join(modcheck.SAVES_DIR, f)
+        saves.append({
+            "name": name,
+            "extension": ext,
+            "modified": datetime.datetime.fromtimestamp(
+                os.path.getmtime(path)).isoformat(timespec="seconds"),
+            "bytes": os.path.getsize(path)})
+    return json.dumps({"saves": saves}, indent=2)
 
 
 def read_resource(uri):

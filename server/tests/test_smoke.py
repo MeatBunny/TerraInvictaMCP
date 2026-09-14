@@ -132,11 +132,7 @@ class SweepBridge:
     the step that reads it expects and nothing more. `dies_on` names the
     scenario whose `campaign.new` takes the bridge down, which is the failure
     this fake exists for: a game that goes down in the middle of a run that
-    has other scenarios still to test.
-
-    The verb set goes down with the socket. `_require` reads it before every
-    campaign start, so a fake that kept answering it would send the sweep
-    into a call the real one never reaches.
+    has other scenarios still to test. Once down, every `call` raises.
     """
 
     def __init__(self, scenarios, logs, dies_on=None, error=None):
@@ -158,12 +154,6 @@ class SweepBridge:
     @property
     def GAME_LOG(self):
         return self.logs["game"]
-
-    def verbs(self, refresh=False):
-        if self.down:
-            raise self.error
-        return {"query.scenarios", "query.time", "campaign.new",
-                "game.main_menu"}
 
     def call(self, verb, args=None, timeout=None):
         if self.down:

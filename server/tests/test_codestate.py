@@ -11,7 +11,7 @@ that changes a byte and demands the failure.
 
 The real server directory is never touched. Each case points codestate at a
 temporary tree and hands it fake modules, which is also the only way to test
-a file being deleted or unreadable underneath a loaded process.
+a file being deleted underneath a loaded process.
 """
 import json
 import os
@@ -121,12 +121,6 @@ class NoteTest(Sandbox):
         beta = self.load("beta.py")
         self.assertEqual(codestate.note(), [beta])
 
-    def test_an_unreadable_file_is_recorded_as_uncomparable(self):
-        path = os.path.join(self.dir, "gone.py")
-        sys.modules["ti_fake_gone"] = _FakeModule(path)
-        codestate.note()
-        self.assertIsNone(codestate._RECORDED[path])
-
 
 class DriftTest(Sandbox):
     """What the comparison says once the disk moves."""
@@ -180,21 +174,6 @@ class DriftTest(Sandbox):
         os.remove(path)
         self.assertIn("gone", codestate.drift()[0][1])
 
-    def test_a_file_unreadable_at_load_time_is_reported(self):
-        path = os.path.join(self.dir, "gone.py")
-        sys.modules["ti_fake_gone"] = _FakeModule(path)
-        codestate.note()
-        self.assertIn("unreadable", codestate.drift()[0][1])
-
-    def test_unverified_lists_modules_that_arrived_after_the_snapshot(self):
-        self.load("alpha.py")
-        codestate.note()
-        self.load("beta.py")
-        self.assertEqual(codestate.unverified(),
-                         [os.path.join("server", "beta.py")])
-        codestate.note()
-        self.assertEqual(codestate.unverified(), [])
-
 
 class VerdictTest(Sandbox):
     """The sentences a caller reads."""
@@ -202,36 +181,24 @@ class VerdictTest(Sandbox):
     def test_clean_verdict_says_current(self):
         self.load("alpha.py")
         codestate.note()
-        self.assertTrue(codestate.verdict().startswith("current -- 1 "))
-
-    def test_clean_verdict_names_what_it_could_not_check(self):
-        self.load("alpha.py")
-        codestate.note()
-        self.load("beta.py")
-        self.assertIn("beta.py", codestate.verdict())
+        line, failed = codestate.check()
+        self.assertTrue(line.startswith("current -- 1 "))
+        self.assertFalse(failed)
 
     def test_stale_verdict_leads_with_the_failure(self):
         path = self.load("alpha.py")
         codestate.note()
         self.rewrite(path, "edited\n")
-        self.assertTrue(codestate.verdict().startswith("STALE -- "))
+        line, failed = codestate.check()
+        self.assertTrue(line.startswith("STALE -- "))
+        self.assertTrue(failed)
+        self.assertEqual(line, codestate.stale())
 
     def test_stale_verdict_names_the_file(self):
         path = self.load("alpha.py")
         codestate.note()
         self.rewrite(path, "edited\n")
-        self.assertIn("alpha.py", codestate.verdict())
-
-    def test_check_pairs_the_line_with_the_failure_flag(self):
-        path = self.load("alpha.py")
-        codestate.note()
-        line, failed = codestate.check()
-        self.assertFalse(failed)
-        self.assertEqual(line, codestate.verdict())
-        self.rewrite(path, "edited\n")
-        line, failed = codestate.check()
-        self.assertTrue(failed)
-        self.assertEqual(line, codestate.stale())
+        self.assertIn("alpha.py", codestate.check()[0])
 
     def test_stale_verdict_says_reconnect_and_not_restart_the_game(self):
         # The instruction is the point: the two failures look identical from
@@ -239,7 +206,7 @@ class VerdictTest(Sandbox):
         path = self.load("alpha.py")
         codestate.note()
         self.rewrite(path, "edited\n")
-        message = codestate.verdict()
+        message = codestate.check()[0]
         self.assertIn("Reconnect this MCP server", message)
         self.assertIn("Relaunching the game does NOT do it", message)
 
@@ -328,9 +295,9 @@ class DispatchTest(Sandbox):
             return tools.handle_call("fake", {})
 
     def test_dispatch_pins_a_module_imported_since_the_last_call(self):
-        self.load("alpha.py")
+        path = self.load("alpha.py")
         self.call({"ok": True})
-        self.assertEqual(codestate.unverified(), [])
+        self.assertIn(path, codestate._RECORDED)
 
     def test_failed_payload_is_returned_marked_an_error_and_stripped(self):
         result = self.call({"offline": {"serverCode": "STALE -- ..."},

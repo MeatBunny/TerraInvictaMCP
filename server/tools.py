@@ -1,8 +1,7 @@
 """Tool table: schemas, annotations, dispatch.
 
-Handlers come in two kinds: a bridge verb name (string; args pass through and
-the verb is feature-checked against the DLL's own registry) or a function
-taking (args, progress). Functions return plain data (JSON-encoded here), a
+Handlers come in two kinds: a bridge verb name (string; args pass through)
+or a function taking (args, progress). Functions return plain data (JSON-encoded here), a
 {"_content": [...]} dict for non-text blocks, or raise compose.ToolError. A
 handler whose payload is worth returning even though the call failed sets
 "_failed": True in the dict; dispatch strips the key and marks the result an
@@ -14,14 +13,9 @@ import re
 import bridge
 import codestate
 import compose
+import modcheck
 from compose import ToolError
 
-try:
-    import modcheck
-except ImportError:
-    modcheck = None
-
-PRETTY_LIMIT = 4096     # responses above this stay compact to save tokens
 TEXT_LIMIT = 160000     # JSON above this is replaced by an explicit tool error
 
 GAME_DOWN = ("game is not running or the bridge is down (%s) -- call "
@@ -37,9 +31,6 @@ GAME_BUSY = ("the bridge accepted the call and did not answer in time (%s). "
              "save, an asset load or a scene change stalls them past the "
              "budget. Do NOT call game_start. Wait and retry; observe reports "
              "whether the process is there.")
-
-MODCHECK_MISSING = ("the %s tool is not available: server/modcheck.py is "
-                    "missing from this install")
 
 # Every console wrapper carries this: most of these commands print nothing at
 # all, so a call that returns empty output is not evidence it did anything.
@@ -96,8 +87,6 @@ def tool_result(text, is_error=False):
 
 def json_result(data):
     text = json.dumps(data, separators=(",", ":"), default=str)
-    if len(text) <= PRETTY_LIMIT:
-        text = json.dumps(data, indent=2, default=str)
     if len(text) > TEXT_LIMIT:
         # The handler has already run. A clipped JSON document is neither a
         # usable result nor evidence that a state-changing command failed.
@@ -209,8 +198,6 @@ def raw_tool(args, progress=None):
 
 
 def modcheck_tool(args, progress=None):
-    if modcheck is None:
-        raise ToolError(MODCHECK_MISSING % "modcheck")
     return modcheck.run(bridge, mod=args.get("mod"),
                         check=args.get("check", "all"),
                         scenario=args.get("scenario"),
@@ -218,14 +205,10 @@ def modcheck_tool(args, progress=None):
 
 
 def save_check_tool(args, progress=None):
-    if modcheck is None or not hasattr(modcheck, "save_check"):
-        raise ToolError(MODCHECK_MISSING % "save_check")
     return modcheck.save_check(name=args.get("name"))
 
 
 def workshop_status_tool(args, progress=None):
-    if modcheck is None or not hasattr(modcheck, "workshop_status"):
-        raise ToolError(MODCHECK_MISSING % "workshop_status")
     return modcheck.workshop_status(mod=args.get("mod"))
 
 
@@ -1241,15 +1224,6 @@ BY_NAME = {t[0]: t[1] for t in TOOLS}
 READ_ONLY = {t[0]: t[2] for t in TOOLS}
 
 
-def call_verb(verb, args):
-    served = bridge.verbs()
-    if verb not in served:
-        raise ToolError(
-            "the running DLL does not serve verb '%s' yet -- rebuild/update "
-            "the mod DLL (run install.sh, restart the game)" % verb)
-    return bridge.call(verb, args)
-
-
 def with_banner(result, banner):
     """Put the pause-limit banner in front of a result the limit let through.
 
@@ -1306,13 +1280,17 @@ def handle_call(name, arguments, progress=None):
         pass
     try:
         if isinstance(handler, str):
-            data = call_verb(handler, args)
+            data = bridge.call(handler, args)
         else:
             data = handler(args, progress)
     except ToolError as e:
         return with_banner(tool_result(str(e), True), banner)
     except bridge.VerbError as e:
-        return with_banner(tool_result("bridge error: %s" % e, True), banner)
+        text = "bridge error: %s" % e
+        if str(e).startswith("unknown command"):
+            text += (" -- the running DLL is older than this server; rebuild "
+                     "or update the mod DLL (run install.sh, restart the game)")
+        return with_banner(tool_result(text, True), banner)
     except bridge.BridgeTimeout as e:
         return with_banner(tool_result(GAME_BUSY % e, True), banner)
     except bridge.BridgeError as e:

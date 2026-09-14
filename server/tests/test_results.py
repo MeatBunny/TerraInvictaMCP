@@ -18,19 +18,13 @@ def compact(data):
 
 
 class JsonResultTest(unittest.TestCase):
-    def test_small_results_keep_their_pretty_format_and_values(self):
-        for data in (None, [], {"ok": True, "text": "quoted \"text\"\n"}):
+    def test_results_that_fit_are_compact_and_keep_their_values(self):
+        for data in (None, [], {"ok": True, "text": "quoted \"text\"\n"},
+                     {"text": "x" * 8192}):
             with self.subTest(data=data):
                 result = tools.json_result(data)
                 self.assertFalse(result["isError"])
-                self.assertEqual(result["content"][0]["text"],
-                                 json.dumps(data, indent=2))
-
-    def test_large_results_that_fit_remain_complete_and_compact(self):
-        data = {"text": "x" * tools.PRETTY_LIMIT}
-        result = tools.json_result(data)
-        self.assertFalse(result["isError"])
-        self.assertEqual(result["content"][0]["text"], compact(data))
+                self.assertEqual(result["content"][0]["text"], compact(data))
 
     def test_text_limit_boundary(self):
         overhead = len(compact({"text": ""}))

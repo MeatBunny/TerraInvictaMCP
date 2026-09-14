@@ -396,7 +396,7 @@ def _fresh_run_state(case):
     """
     saved = dict(compose._RUN)
     compose._RUN.update({"zeroCalls": 0, "zeroReasons": [],
-                         "crashRecoveries": 0, "crashRestarted": False,
+                         "crashRecoveries": 0,
                          "macroOn": False,
                          "campaignToken": None, "campaignAt": None,
                          "save": None, "saveToken": None,
@@ -579,12 +579,6 @@ class DismissRefusalTest(unittest.TestCase):
         digest, _ = self._run({"ok": False, "reason": "somethingNew",
                                "text": "no"})
         self.assertEqual(digest["stopReason"], "prompts_refused")
-
-    def test_a_refusal_with_no_text_gets_a_next_anyway(self):
-        stop, text = compose._dismiss_refusal({"ok": False,
-                                               "reason": "somethingNew"})
-        self.assertEqual(stop, "prompts_refused")
-        self.assertIn("somethingNew", text)
 
 
 class NarrativeModeTest(unittest.TestCase):
@@ -1112,19 +1106,6 @@ class CombatRetryTest(unittest.TestCase):
         self.assertIn("non-AI faction Resistance", digest["next"])
         self.assertIn("7", digest["next"])
 
-    def test_a_repeated_failure_stops_after_the_second_attempt(self):
-        # No retryable flag: an older DLL, or one that classified the failure
-        # as worth a retry. The server holds the same limit either way.
-        fake = FakeBridge(CLEAR, combat=_combat(
-            error="no precombat controller"))
-        with mock.patch.object(compose, "bridge", fake):
-            digest = compose.advance({"days": 1, "max_seconds": 600})
-        self.assertEqual(digest["stopReason"], "combat")
-        self.assertEqual(fake.count("combat.autoresolve"),
-                         compose.COMBAT_ARM_LIMIT)
-        self.assertIn("no precombat controller", digest["next"])
-        self.assertIn("combat_precombat", digest["next"])
-
     def test_an_error_belonging_to_another_combat_does_not_stop_this_one(self):
         # A fails, B appears while A's canvas still holds the clock, and the
         # status reports B with A's error attached. Stopping there would name
@@ -1265,22 +1246,6 @@ class CrashTest(unittest.TestCase):
         self.assertFalse(digest["crash"]["recovered"])
         self.assertIn("restart loop", digest["next"])
         self.assertEqual(len(self.starts), 1)
-
-    def test_a_spent_budget_never_claims_a_restart_that_did_not_run(self):
-        # The budget is spent when the attempt starts, so a recovery that
-        # died at the stop leaves it at the limit with nothing restarted.
-        # Saying "crashed again after an automatic restart" there describes
-        # a restart the run never had.
-        self.stop_works = False
-        self._run()
-        self.assertEqual(compose._RUN["crashRecoveries"], 1)
-        self.stop_works = True
-        digest = self._run()
-        self.assertEqual(digest["stopReason"], "crashed")
-        self.assertFalse(digest["crash"]["recovered"])
-        self.assertIn("restart loop", digest["next"])
-        self.assertNotIn("after an automatic restart", digest["next"])
-        self.assertEqual(self.starts, [])
 
     def test_a_spent_budget_with_no_save_says_so_instead(self):
         # A budget carried in from an earlier campaign is not the blocker

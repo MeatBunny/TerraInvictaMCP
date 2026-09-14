@@ -746,8 +746,8 @@ class DeadBridgeTest(unittest.TestCase):
         fake = DeadBridge(412.0, 1.0)
         # Two patches, because a verb-backed tool reaches the bridge by a
         # second route: the gate and the campaign note go through
-        # compose.bridge, and tools.call_verb goes through the bridge module
-        # itself, for the verb set and then for the verb. Patching only the
+        # compose.bridge, and handle_call sends a verb-backed tool's verb
+        # through the bridge module itself. Patching only the
         # first leaves the write below dialing the real port, where a running
         # game answers spawn.hab with its own argument error and the case
         # never sees the dead bridge it is about.

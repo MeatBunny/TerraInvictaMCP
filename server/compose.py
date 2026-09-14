@@ -6,12 +6,12 @@ tools.py) or a {"_content": [...]} dict for non-text blocks. They raise
 ToolError for agent-correctable failures; bridge.BridgeError propagates and
 becomes the game-down guidance in tools.py.
 """
-import ast
 import base64
 import datetime
 import filecmp
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -36,11 +36,6 @@ EXE_NAME = "TerraInvicta.exe"
 # `ls '<game>/TerraInvicta.exe'` was a valid kill target. Name matching cannot
 # be spoofed that way.
 GAME_COMM = r"^TerraInvicta\.ex"
-# The old command-line matcher, kept as a fallback for a launch layout that
-# does not rename the process. It only ever fires when the bridge proves the
-# game is up (see game_stop), because on its own it cannot tell the game from
-# a shell that mentions it.
-KILL_PATTERN = r"TerraInvicta\.exe"
 LAUNCH_WAIT = 180       # seconds to wait for the bridge after a Steam launch
 CAMPAIGN_WAIT = 300     # seconds to wait for a campaign after a load/new
 
@@ -66,10 +61,6 @@ _RUN = {
     # guard rail is one: a crash that recurs on reload must not become a
     # restart loop.
     "crashRecoveries": 0,
-    # Whether one of those restarts actually completed. The counter alone does
-    # not say: it is spent when the attempt starts, and an attempt that dies
-    # at the stop or at the launch restarted nothing.
-    "crashRestarted": False,
     # The autopilot macro was switched on through this server and has not been
     # switched off. Only then is its engaged state worth polling.
     "macroOn": False,
@@ -102,11 +93,6 @@ ZERO_PROGRESS_REFUSE = 3
 # Automatic crash restarts allowed without intervening progress.
 MAX_CRASH_RECOVERIES = 1
 
-# Arms on one combat inside a single advance call. The DLL keeps its own
-# per-combat count and refuses past it; this is the same limit held on the
-# server side, so an older DLL that reports no retryable flag still stops.
-COMBAT_ARM_LIMIT = 2
-
 # Seconds to wait for the bridge to go quiet after a stop, before a restart is
 # called failed.
 BRIDGE_DOWN_WAIT = 20
@@ -121,8 +107,7 @@ LOST_POLLS_MAX = 5
 
 # Polls with an unreadable remaining-prompt count before the call stops. The
 # count is unreadable when the dismiss call raised, when the reply was not a
-# dictionary, or when the queue refused -- three paths that used to read as
-# "nothing is blocking" and spin.
+# dictionary, or when the queue refused; none of those is a clear queue.
 UNKNOWN_REMAINING_POLLS = 5
 
 # Polls a call will spend with the clock held down for an open mission phase
@@ -277,9 +262,8 @@ def _speed_level(value):
     """The speed level an argument names, or None when it names none.
 
     Coerced, because the wire is JSON and a client that types its arguments
-    loosely sends "0" for 0 -- which the DLL accepts as a pause and this
-    module used to let through as something else entirely. A boolean is not a
-    level: bool is an int in Python and False would read as speed 0.
+    loosely sends "0" for 0, which the DLL accepts as a pause. A boolean is
+    not a level: bool is an int in Python and False would read as speed 0.
     """
     if value is None or isinstance(value, bool):
         return None
@@ -400,7 +384,7 @@ def _blocking_prompt():
     different fixing.
     """
     data = _try("prompts.list")
-    items = data.get("prompts") if isinstance(data, dict) else data
+    items = data.get("prompts") if isinstance(data, dict) else None
     if not isinstance(items, list):
         return None
     for item in items:
@@ -472,8 +456,8 @@ def stall_counters():
 # the same as a reply that carried no stall block. The first says nothing was
 # measured and the cached seconds are now stale by however long the call took;
 # the second is a DLL older than the key, whose cached seconds are current.
-# One value used to stand for both, and a caller that could not tell them apart
-# went on refusing calls over a reading taken before the bridge died.
+# Told apart, or the limit refuses calls over a reading taken before the
+# bridge died.
 UNREADABLE = object()
 
 
@@ -576,9 +560,8 @@ def pause_gate(name, args, read_only=False):
     stall, block = current_reading()
     # The diagnosis before the record, not after it. current_reading skips the
     # query.time while the cached seconds are fresh, and the violation record
-    # is written once per episode -- so a crossing detected off a fresh cache
-    # used to record a null state, a null crawl and a null sinceLastVerbSeconds
-    # for the whole episode, which is the diagnosis the record exists to hold.
+    # is written once per episode, so a crossing detected off a fresh cache
+    # needs the block read now or the whole episode records a null state.
     # One extra verb, only on the readings that are about to refuse something.
     if block is None and stall is not None and stall > limit:
         block = _refresh_stall()
@@ -661,7 +644,6 @@ def _note_progress(days, reason):
     # way clears the budget.
     if days > 0 and reason not in ("crashed", "crash_recovered"):
         _RUN["crashRecoveries"] = 0
-        _RUN["crashRestarted"] = False
 
 
 def _reset_run(keep_macro=False):
@@ -900,13 +882,6 @@ def _try(verb, args=None):
         return None
 
 
-def _require(verb):
-    if verb not in bridge.verbs():
-        raise ToolError(
-            "the running DLL does not serve verb '%s' yet -- rebuild/update "
-            "the mod DLL (run the installer, restart the game)" % verb)
-
-
 def _parse_date(value):
     try:
         return datetime.date.fromisoformat(str(value)[:10])
@@ -915,21 +890,10 @@ def _parse_date(value):
 
 
 def _date_of(t):
-    for key in ("date", "currentDate", "now"):
-        if isinstance(t, dict) and t.get(key):
-            return _parse_date(t[key])
+    if isinstance(t, dict) and t.get("date"):
+        return _parse_date(t["date"])
     raise ToolError("query.time returned no date field: %s"
                     % json.dumps(t, default=str)[:200])
-
-
-def _count(x):
-    if isinstance(x, (list, dict)):
-        return len(x)
-    if isinstance(x, bool):
-        return int(x)
-    if isinstance(x, (int, float)):
-        return int(x)
-    return 0
 
 
 # A flag argument that means what it says. The schema declares a boolean and a
@@ -949,25 +913,6 @@ def _flag(args, key, default):
     if v is None:
         return default
     return bool(v)
-
-
-# The three things a run can do with a story event, and the one argument that
-# says which. `narrative_events` was a boolean, and the two false-ish
-# behaviours -- hand the event to the caller, or leave it for a person -- had
-# to share it, so a run that meant "stop and let me answer" got the wording and
-# the patience of a run waiting for somebody at the keyboard.
-#
-#   ai     the engine's own AI option strategy presses a button (the default,
-#          and what `true` has always meant)
-#   llm    nobody presses it: the call stops on the first open box and hands
-#          the decision back to the caller
-#   false  attended. Nothing here presses and nothing here stops early; a
-#          person is expected to be driving.
-#
-# The engine sees a boolean either way: only `ai` answers, so `narrative` is
-# false for both of the others, and the mode rides beside it as a string an
-# older DLL ignores.
-NARRATIVE_MODES = ("ai", "llm", "false")
 
 
 def _narrative_mode(args, key="narrative_events"):
@@ -1003,10 +948,8 @@ def _narrative_mode(args, key="narrative_events"):
 # queue draining rather than a decision. This is the bound on a box that never
 # arrives at all; at a 2s poll it is about a minute, and it has to stay well
 # inside advance's own default 90s budget or the run reports a time-out
-# instead of the hold. It used to be ten polls, and a smoke test on a healthy
-# tree hit that ceiling on an ordinary campaign start -- one more advance and
-# one alert_choose cleared the event and it did not recur, which is a wait
-# that was too short rather than a hold.
+# instead of the hold. Ten polls was too short: an ordinary campaign start
+# hit it on a healthy tree.
 NARRATIVE_BOX_POLLS = 30
 
 # Polls the box gets once it HAS rendered. The wait no longer ends on a
@@ -1063,8 +1006,7 @@ def _box_open(alert):
 # llm handover begins on, and the two reading it differently is how a call
 # ends on a decision with the box it was waiting for standing open.
 #
-# `pressLands` absent is a DLL older than the key and is taken at its word,
-# which is the behaviour every build had before it existed.
+# `pressLands` absent is a DLL older than the key and is taken at its word.
 def _box_answerable(alert):
     return (_box_open(alert)
             and alert.get("pressLands") is not False)
@@ -1109,10 +1051,8 @@ def _phase_block(t):
     """The mission-phase block off a query.time reply, or None.
 
     A DLL older than that key returns None here, and an absent block reads
-    everywhere below as a closed phase -- the behaviour before this existed,
-    which handed the clock back unconditionally. A server that refused to run
-    against an old DLL would be a worse failure than the collision it is
-    guarding.
+    everywhere below as a closed phase. A server that refused to run against
+    an old DLL would be a worse failure than the collision it is guarding.
     """
     block = t.get("missionPhase") if isinstance(t, dict) else None
     return block if isinstance(block, dict) else None
@@ -1151,33 +1091,45 @@ def _phase_decision(t, waits, force=False, engaged=False,
     return "hold", waits, phase
 
 
-def _refused_hold(t):
-    """Turn an arm the DLL refused for a phase into a hold. Always True.
-
-    The DLL saw a mission phase that the reading in hand did not, which means
-    it opened in the frames between the two. Nothing is armed and nothing was
-    played, so this poll is already holding in everything but name: saying so
-    keeps the rest of the loop body off the clock as well -- no resume at the
-    bottom of the poll, no speed re-assert at the top of the next one -- and
-    the next reading takes over as the hold proper, counting its waits.
-    """
-    _hold_clock(t)
-    return True
-
-
 def _note_phase(digest, phase):
     """Put an open mission phase in the digest, whether or not it is held for.
 
     Two readings return "run" over an open phase: force=true, and an
     ai.control engagement. Both hand the clock back into the phase on purpose,
-    and both used to leave a digest indistinguishable from a call that never
-    met a phase at all -- so a forced run that caused a collision had nothing
-    in its own report pointing at it. The block recorded is the last reading
-    of this call that found the phase open, which makes the key mean "a phase
-    was open during this call" rather than "one is open now".
+    so a forced run that causes a collision has the phase in its own report.
+    The block recorded is the last reading of this call that found the phase
+    open, which makes the key mean "a phase was open during this call" rather
+    than "one is open now".
     """
     if isinstance(phase, dict) and phase.get("active"):
         digest["missionPhase"] = phase
+
+
+def _phase_step(t, digest, phase_waits, armed, force, engaged, target):
+    """The phase reading and the clock action both the door and the loop take.
+
+    Returns (holding_phase, phase_waits, armed, action, phase). A hold takes
+    the clock down and disarms: a target armed before the phase opened is
+    still a clock heading into it, and it is re-armed when the phase closes
+    (the DLL answers alreadyArmed and does not touch the park). An arm the
+    DLL refused for a phase the reading did not show is a hold too: nothing
+    was played, so the poll stays off the clock and the next reading counts
+    the waits.
+    """
+    action, phase_waits, phase = _phase_decision(t, phase_waits, force, engaged)
+    _note_phase(digest, phase)
+    if action != "run":
+        digest["missionPhaseWaits"] = phase_waits
+        if action == "stop":
+            return True, phase_waits, armed, action, phase
+        _hold_clock(t)
+        return True, phase_waits, False, action, phase
+    if not armed:
+        armed, refusal = _start_clock(target, force)
+        if refusal == "mission_phase":
+            _hold_clock(t)
+            return True, phase_waits, armed, action, phase
+    return False, phase_waits, armed, action, phase
 
 
 def _ai_engaged():
@@ -1266,10 +1218,9 @@ def _arm_run_until(target, force):
 def _armed_note(armed):
     """What the budget messages may claim about the target.
 
-    "run_until stays armed" was unconditional, and a call that spent its
-    budget waiting on a mission phase never armed anything -- so the sentence
-    told the caller a stop was waiting for it at a date the game will run
-    straight past.
+    A call that spent its budget waiting on a mission phase never armed
+    anything, and must not tell the caller a stop is waiting at a date the
+    game will run straight past.
     """
     if armed:
         return "run_until stays armed"
@@ -1404,12 +1355,8 @@ def _wait_secs(value, default=CAMPAIGN_WAIT):
     Only None is absent. A boolean is a client saying "wait" rather than a
     number of seconds, so it takes the default too -- int(True) is a
     one-second wait, which is a wait that always fails. Everything else is the
-    caller's own number, including 0.
-
-    The membership test this replaces was `value in (None, True, False)`, and
-    bool is an int in Python: 0 equals False and 1 equals True, so a caller
-    asking for no wait at all, or for one second, was given the full default
-    instead.
+    caller's own number, including 0. Tested with isinstance: bool is an int
+    in Python, so `value in (None, True, False)` would swallow 0 and 1.
     """
     if value is None or isinstance(value, bool):
         return default
@@ -1515,10 +1462,13 @@ def pause_limit_tool(args, progress=None):
     everything else is being refused.
     """
     out = stall_counters()
-    out["note"] = ("set_pause_limit seconds=N changes it, 0 disables it. It "
-                   "is server session state: it lasts until this server "
-                   "process exits and is written nowhere.")
+    out["note"] = ("set_pause_limit seconds=N changes it, 0 disables it; "
+                   + SESSION_STATE_NOTE)
     return out
+
+
+SESSION_STATE_NOTE = ("the limit is server session state: it lasts until "
+                      "this server process exits and is written nowhere.")
 
 
 def set_pause_limit_tool(args, progress=None):
@@ -1529,10 +1479,8 @@ def set_pause_limit_tool(args, progress=None):
                         "limit); pause_limit reads the current one")
     set_pause_limit(seconds, record=True)
     out = stall_counters()
-    out["note"] = ("the limit is server session state: it lasts until this "
-                   "server process exits and is written nowhere. Every "
-                   "observe reports it, so a run that changed it cannot hide "
-                   "that it did.")
+    out["note"] = (SESSION_STATE_NOTE + " Every observe reports it, so a run "
+                   "that changed it cannot hide that it did.")
     return out
 
 
@@ -1551,10 +1499,6 @@ def _observe(args, progress=None):
 
     report = {"bridge": "up"}
     report["version"] = _try("version")
-    try:
-        report["verbsServed"] = len(bridge.verbs())
-    except (BridgeError, VerbError):
-        pass
     try:
         t = bridge.call("query.time")
     except VerbError:
@@ -1592,7 +1536,7 @@ def _observe(args, progress=None):
 
     prompts_data = _try("prompts.list")
     items = prompts_data.get("prompts") if isinstance(prompts_data, dict) \
-        else prompts_data
+        else None
     if isinstance(items, list):
         report["pendingPrompts"] = [
             p.get("name") or p.get("type") or str(p)[:40]
@@ -1612,13 +1556,9 @@ def _observe(args, progress=None):
             report["combat"] = summary
 
     factions = _try("query.factions")
-    if isinstance(factions, dict):
-        factions = factions.get("factions")
     if isinstance(factions, list):
         for f in factions:
-            if isinstance(f, dict) and (f.get("activePlayer")
-                                        or f.get("active_player")
-                                        or f.get("player")):
+            if isinstance(f, dict) and f.get("activePlayer"):
                 report["playerFaction"] = f
                 break
 
@@ -1703,18 +1643,9 @@ def game_start(args, progress=None):
         out["bridge"] = "up"
         out["bridgeUpAfterSeconds"] = round(_time.monotonic() - t0)
     if load:
-        a = {"name": load}
-        if args.get("extension"):
-            a["extension"] = args["extension"]
-        try:
-            bridge.call("saves.load", a)
-        except VerbError as e:
-            raise ToolError("load failed: %s%s" % (e, _saves_hint()))
-        _entered_campaign(load, args.get("extension"))
+        load_game({"name": load, "extension": args.get("extension")})
         out["load"] = load
-        out["campaign"] = _wait_campaign(_wait_secs(args.get("wait_campaign")),
-                                         progress)
-    elif args.get("wait_campaign"):
+    if load or args.get("wait_campaign"):
         out["campaign"] = _wait_campaign(_wait_secs(args.get("wait_campaign")),
                                          progress)
     return out
@@ -1746,9 +1677,8 @@ def game_stop(args, progress=None):
                 killed.append(pid)
             except OSError as e:
                 failed.append("%d (%s)" % (pid, e))
-        # The command-line match used to take the whole Steam launch chain
-        # down with the game, so a game that sat on SIGTERM died anyway. Only
-        # the game is signalled now, so survivors are escalated here instead.
+        # Only the game is signalled, so a survivor of SIGTERM is escalated
+        # here.
         deadline = _time.monotonic() + 10
         while _time.monotonic() < deadline and _game_pids():
             _time.sleep(0.5)
@@ -1771,26 +1701,9 @@ def game_stop(args, progress=None):
         if failed:
             out["failed"] = failed
         return out
-    # Nothing carries the game's process name. Either the game is not running,
-    # or this launch layout does not rename the process -- and only the bridge
-    # can tell those apart. The command-line match is allowed to fire in the
-    # second case alone, because on its own it would also match an agent's own
-    # shell command that mentions the exe.
-    if not _bridge_up():
-        return {"stopped": False, "matchedBy": "process name",
-                "note": "no process named %s and the bridge is not answering "
-                        "-- the game is not running" % EXE_NAME}
-    try:
-        rc = subprocess.run(["pkill", "-f", KILL_PATTERN]).returncode
-    except OSError as e:
-        raise ToolError("pkill failed: %s" % e)
-    return {"stopped": rc in (0, 144), "pkillExit": rc,
-            "matchedBy": "command line (fallback)",
-            "note": "the bridge answered but no process is named %s, so this "
-                    "killed everything whose COMMAND LINE mentions it -- the "
-                    "whole Steam launch chain, and anything else that happened "
-                    "to name the file. exit 1 means no process matched; 144 "
-                    "(self-match) is harmless" % EXE_NAME}
+    return {"stopped": False, "matchedBy": "process name",
+            "note": "no process named %s -- the game is not running"
+                    % EXE_NAME}
 
 
 # --------------------------------------------------- crash fixture (testing)
@@ -1800,27 +1713,11 @@ def game_stop(args, progress=None):
 # accident.
 CRASH_CONFIRM = "crash-the-game"
 
-CRASH_REFUSAL = (
-    "crash_the_game ENDS THIS SESSION. It is a TEST FIXTURE: it raises a real "
-    "unhandled exception inside the game so the game's own crash handler runs. "
-    "The crash panel comes up, the clock is paused and blocked, every event "
-    "listener is cleared and input is switched off. Nothing inside the process "
-    "undoes that, so recovery is game_stop, game_start and load_game; anything "
-    "unsaved is lost. It exists to test that crash detection and automatic "
-    "recovery work, and has no other use. If you meant to stop the game, call "
-    "game_stop. To crash it anyway, pass confirm=\"%s\"." % CRASH_CONFIRM)
-
 
 def crash_the_game(args, progress=None):
-    """Put the game into its own crash state deliberately.
-
-    Checked here as well as in the DLL so an accidental call never reaches the
-    game at all. The DLL keeps its own check because `raw` and `batch` go
-    straight to the verb.
-    """
-    if args.get("confirm") != CRASH_CONFIRM:
-        raise ToolError(CRASH_REFUSAL)
-    return _require_call("test.crash_the_game", {"confirm": CRASH_CONFIRM})
+    """Put the game into its own crash state deliberately. The DLL checks
+    `confirm` and refuses before touching anything."""
+    return bridge.call("test.crash_the_game", args)
 
 
 # ---------------------------------------------------------------- advance
@@ -1841,8 +1738,6 @@ def _crashed(t):
 def _save_rows():
     """Every save the DLL lists, as {name, extension, mtime} rows."""
     saves = _try("saves.list")
-    if isinstance(saves, dict):
-        saves = saves.get("saves", saves)
     if not isinstance(saves, list):
         return []
     return [s for s in saves if isinstance(s, dict) and s.get("name")]
@@ -1932,22 +1827,12 @@ def _recover_from_crash(digest, at, progress=None):
 
     if _RUN["crashRecoveries"] >= MAX_CRASH_RECOVERIES:
         digest["crash"]["recovered"] = False
-        if _RUN["crashRestarted"]:
-            digest["next"] = (
-                "the game crashed again after an automatic restart, so this "
-                "one was not retried: a crash that recurs on reload would "
-                "otherwise become a restart loop. Read log_tail which=player "
-                "for the exception, then decide by hand. game_start "
-                "load=<save> resumes once the cause is understood.")
-        else:
-            digest["next"] = (
-                "the game crashed again with this run's one automatic "
-                "restart already spent by a recovery that never got as far "
-                "as restarting anything, so this one was not retried: a "
-                "crash that recurs would otherwise become a restart loop. "
-                "Read log_tail which=player for the exception, then decide "
-                "by hand. game_start load=<save> resumes once the cause is "
-                "understood.")
+        digest["next"] = (
+            "the game crashed again with this run's one automatic restart "
+            "already spent, so this one was not retried: a crash that recurs "
+            "on reload would otherwise become a restart loop. Read log_tail "
+            "which=player for the exception, then decide by hand. game_start "
+            "load=<save> resumes once the cause is understood.")
         return "crashed"
 
     _RUN["crashRecoveries"] += 1
@@ -1995,9 +1880,6 @@ def _recover_from_crash(digest, at, progress=None):
                           "load=<save> by hand." % e)
         return "crashed"
     digest["crash"]["recovered"] = True
-    # A restart that got all the way here is the only one the terminal text
-    # may claim: the two exits above spend the budget without one.
-    _RUN["crashRestarted"] = True
     # A new process carries no macro. Leaving the flag set would have the next
     # call poll a switch nobody threw and stop on it.
     _RUN["macroOn"] = False
@@ -2006,12 +1888,6 @@ def _recover_from_crash(digest, at, progress=None):
         "not survive the restart, so call advance again with until=%s to "
         "continue." % (save.get("name"), digest["targetDate"]))
     return "crash_recovered"
-
-
-# The stop reason each prompts.dismiss refusal ends the call with. A reason
-# this server does not know still stops -- the DLL declined to run the pass,
-# whatever it called it -- under the generic name.
-DISMISS_REFUSALS = {"activePlayerMoved": "active_player_moved"}
 
 
 def _dismiss_refusal(dismissed):
@@ -2025,21 +1901,17 @@ def _dismiss_refusal(dismissed):
     if not isinstance(dismissed, dict) or dismissed.get("ok") is not False:
         return None
     reason = dismissed.get("reason")
-    stop = DISMISS_REFUSALS.get(reason, "prompts_refused")
-    text = dismissed.get("text")
-    if not text:
-        text = ("prompts.dismiss refused to run its pass (reason: %s). "
-                "Read prompts for the queue." % (reason or "unstated"))
-    return stop, text
+    # A reason this server does not know still stops, under the generic name.
+    stop = "active_player_moved" if reason == "activePlayerMoved" \
+        else "prompts_refused"
+    return stop, dismissed.get("text")
 
 
 def _remaining(dismissed):
     """(count, known). A count that could not be read is not a count of zero.
 
     Three paths leave it unreadable: the dismiss call raised, the reply was
-    not a dictionary, or the queue refused. All three used to fall through the
-    same branch as a clear queue, so the hold counter stayed at zero while the
-    loop resumed every two seconds forever.
+    not a dictionary, or the queue refused. None of them is a clear queue.
     """
     if not isinstance(dismissed, dict) or "remaining" not in dismissed:
         return None, False
@@ -2066,13 +1938,9 @@ def advance(args, progress=None):
         raise ToolError("answer_policy must be 'neutral' (default) or 'all' "
                         "(force-drop undecided prompts)")
     autoresolve = _flag(args, "autoresolve", True)
-    # Defaults to answering. A narrative event used to come back as a skipped
-    # prompt with "no neutral answer" and hard-block the run on the first story
-    # event, which needed a person at the screen. `llm` is that stop made
-    # useful -- the call ends on the open box and the caller answers it -- and
-    # `false` is the attended case, where nobody here is going to.
+    # Defaults to answering. `llm` ends the call on the open box so the caller
+    # answers it; `false` is the attended case, where nobody here is going to.
     narrative_mode = _narrative_mode(args)
-    narrative_events = narrative_mode == "ai"
     force = _flag(args, "force", False)
     max_seconds = float(args.get("max_seconds", 90))
 
@@ -2133,20 +2001,11 @@ def advance(args, progress=None):
     # change. With ai.control engaged the DLL's own prefix guards the phase,
     # so the hold below is skipped entirely.
     engaged = _ai_engaged()
-    # The clock is conditional now: a mission phase open at the door is one
-    # this call holds for rather than runs into. `armed` stays false, and
-    # nothing hands the clock back, until the phase reads closed.
-    action, phase_waits, phase = _phase_decision(t, 0, force, engaged)
-    holding_phase = action != "run"
-    _note_phase(digest, phase)
-    armed = False
-    if holding_phase:
-        digest["missionPhaseWaits"] = phase_waits
-        _hold_clock(t)
-    else:
-        armed, refusal = _start_clock(target, force)
-        if refusal == "mission_phase":
-            holding_phase = _refused_hold(t)
+    # The clock is conditional: a mission phase open at the door is one this
+    # call holds for rather than runs into. `armed` stays false, and nothing
+    # hands the clock back, until the phase reads closed.
+    holding_phase, phase_waits, armed, _action, _phase = _phase_step(
+        t, digest, 0, False, force, engaged, target)
 
     t0 = _time.monotonic()
     stuck = 0
@@ -2160,17 +2019,15 @@ def advance(args, progress=None):
     # Polls of THIS hold on which the alert box was open with live options.
     box_polls = 0
     was_waiting_for_box = False
-    combat_arms = {}
+    combat_arms = set()
     # Whether the previous poll found a combat. The pause limit reads it: a
     # combat this call did not arm is still a combat holding the clock.
     in_combat = False
     cur = start
-    # Every exit that has a digest to report goes through _finish, this
-    # one included. A transport failure used to unwind the whole call: the
-    # tool layer reported the game down and the digest went with it, so a
-    # run dying this way left no record of the prompts it had answered and
-    # no count of the call. BridgeTimeout is handled inside the loop as one
-    # lost poll and never reaches here.
+    # Every exit that has a digest to report goes through _finish, a
+    # transport failure included: the digest and the call count survive it.
+    # BridgeTimeout is handled inside the loop as one lost poll and never
+    # reaches here.
     try:
         while True:
             _time.sleep(2)
@@ -2255,26 +2112,12 @@ def advance(args, progress=None):
             # tested -- read a poll late, the call stops on `pause_limit` with
             # a `next` telling the caller to force=true through the collision
             # the hold exists to prevent.
-            action, phase_waits, phase = _phase_decision(
-                t, phase_waits, force, engaged)
-            holding_phase = action != "run"
-            _note_phase(digest, phase)
-            if holding_phase:
-                digest["missionPhaseWaits"] = phase_waits
-                if action == "stop":
-                    digest["stopReason"] = "mission_phase"
-                    digest["next"] = _phase_next(target.isoformat(), phase)
-                    break
-                # Whatever was armed, this call is no longer running: a target
-                # armed before the phase opened is still a clock heading into
-                # it. Re-armed when the phase closes, which the DLL answers as
-                # alreadyArmed and does not touch the park for.
-                armed = False
-                _hold_clock(t)
-            elif not armed:
-                armed, refusal = _start_clock(target, force)
-                if refusal == "mission_phase":
-                    holding_phase = _refused_hold(t)
+            holding_phase, phase_waits, armed, action, phase = _phase_step(
+                t, digest, phase_waits, armed, force, engaged, target)
+            if action == "stop":
+                digest["stopReason"] = "mission_phase"
+                digest["next"] = _phase_next(target.isoformat(), phase)
+                break
             # The pause limit, off the reading this poll already took. Not at
             # the door and not on the first poll: advance is the tool that
             # clears a stall, so it gets a full pass of the loop body -- the
@@ -2366,33 +2209,25 @@ def advance(args, progress=None):
                            or ar.get("autoresolving"))
             if has_combat and autoresolve and not ar_busy:
                 # The recorded error, read instead of ignored. A failed tick
-                # disarms, so this branch used to look exactly like a first arm
-                # and re-entered the machine from the start -- which is how
-                # AutoresolveSelected and OnAcceptAutoresolveSelected got to
-                # fire twice, the second of those applying simulated damage to
-                # the real states a second time. The DLL refuses those re-arms
-                # now; this stops before making the call, so the reason names
-                # the combat and the error rather than the run hitting its time
-                # budget.
+                # disarms, so without this a failed combat looks like a first
+                # arm; re-arming it runs AutoresolveSelected and
+                # OnAcceptAutoresolveSelected twice and applies the simulated
+                # damage to the real states twice. The DLL refuses those
+                # re-arms; this stops before making the call, so the reason
+                # names the combat and the error rather than the time budget.
                 cid = _combat_id(cs, ar)
-                arms = combat_arms.get(cid, 0)
                 # The machine's recorded error belongs to whichever combat it
                 # last touched, and that is not always the one this poll is
                 # about: after A fails and B appears while A's canvas still
                 # holds the clock, the status reports B with A's error
                 # attached. `attemptedCombat` names the owner, so the gate
-                # applies only when it matches. A DLL old enough not to report
-                # it also has no `retryable`, so the only gate left is the
-                # per-combat arm count, which is keyed correctly.
+                # applies only when it matches.
                 attempted = ar.get("attemptedCombat")
                 mine = attempted is None or cid is None or attempted == cid
                 error = ar.get("error") if mine else None
                 blocked_by = None
                 if error and ar.get("retryable") is False:
                     blocked_by = "the mod will not arm on it again"
-                elif error and arms >= COMBAT_ARM_LIMIT:
-                    blocked_by = ("%d attempts in this call is the limit"
-                                  % arms)
                 if blocked_by:
                     digest["stopReason"] = "combat"
                     digest["combat"] = cs
@@ -2415,13 +2250,11 @@ def advance(args, progress=None):
                     # against.
                     bridge.call("combat.autoresolve",
                                 {"combat": cid} if cid is not None else {})
-                    # Distinct combats armed, not arms made. The counter used
-                    # to tick once per arm, so a combat that failed and was
-                    # re-armed every poll reported as a run that resolved
-                    # dozens of fights.
+                    # Distinct combats armed, not arms made: a combat that
+                    # failed and was re-armed is still one fight.
                     if cid not in combat_arms:
                         digest["combatsAutoresolved"] += 1
-                    combat_arms[cid] = arms + 1
+                    combat_arms.add(cid)
                 except VerbError as e:
                     digest["stopReason"] = "combat"
                     digest["combat"] = cs
@@ -2450,7 +2283,7 @@ def advance(args, progress=None):
             # was left for. A DLL older than the key ignores it and behaves as
             # it always did.
             dismiss_args["narrativeMode"] = narrative_mode
-            if not narrative_events:
+            if narrative_mode != "ai":
                 dismiss_args["narrative"] = False
             try:
                 dismissed = bridge.call("prompts.dismiss", dismiss_args)
@@ -2468,9 +2301,11 @@ def advance(args, progress=None):
                 digest["promptsRefusal"] = dismissed
                 break
             if isinstance(dismissed, dict):
-                digest["promptsAnswered"] += _count(dismissed.get("dismissed"))
-                digest["promptsAnswered"] += _count(dismissed.get("forced"))
-                digest["screensClosed"] += _count(dismissed.get("screens"))
+                for key, into in (("dismissed", "promptsAnswered"),
+                                  ("forced", "promptsAnswered"),
+                                  ("screens", "screensClosed")):
+                    value = dismissed.get(key)
+                    digest[into] += len(value) if isinstance(value, list) else 0
                 # Read off the bridge's own key rather than sniffed out of the
                 # screens log. The log is prose, and matching "narrative" in it
                 # captured every ordinary answer as an anomaly while missing
@@ -2733,9 +2568,9 @@ def _combat_orphan(report, status):
     """After a resolution ends: is a begin-combat prompt holding the clock with
     nothing left that could clear it, and if so, take it off the queue.
 
-    The DLL clears this itself now, on the one path that used to leave it (a
-    combat that ends with no simulation to accept, where no button ever runs).
-    This is the backstop: an older DLL, or any other route to the same state.
+    The DLL clears this itself on the one path that leaves it (a combat that
+    ends with no simulation to accept, where no button ever runs). This is
+    the backstop: an older DLL, or any other route to the same state.
 
     Two conditions, and both are about not touching a live fight.
 
@@ -2750,9 +2585,8 @@ def _combat_orphan(report, status):
     an unresolved combat is still there.
 
     Both conditions are read, never assumed. A screen read that fails says
-    nothing about the canvas, and reading it as a canvas that is down is the
-    same mistake the status poll used to make: it turns silence into the one
-    answer that allows the drop.
+    nothing about the canvas, and reading it as a canvas that is down turns
+    silence into the one answer that allows the drop.
     """
     try:
         screen = bridge.call("combat.precombat", {"action": "status"})
@@ -2828,16 +2662,14 @@ def combat_autoresolve(args, progress=None):
     """Arm a headless resolution AND wait it out, with a diagnosis on a stall.
 
     The verb arms and returns inside one frame, which is the execution model.
-    The waiting belongs on this side, and it used to be left to the caller:
-    a resolution that never finished read as a tool that hung, and the state
-    it left behind -- a combat gone, a begin-combat prompt standing, the clock
-    frozen -- had to be worked out by hand.
+    The waiting belongs on this side: a resolution that never finishes has to
+    be reported with the state it left behind (a combat gone, a begin-combat
+    prompt standing, the clock frozen) rather than as a tool that hung.
 
     Every refusal the verb makes is still a refusal here (a one-shot that has
     already fired, a failure no retry changes, the attempt budget). Those are
     the contract and they raise.
     """
-    _require("combat.autoresolve")
     a = {}
     if args.get("combat") is not None:
         a["combat"] = args["combat"]
@@ -2864,12 +2696,10 @@ def combat_autoresolve(args, progress=None):
     status = {}
     ar = {}
     # Consecutive polls that came back with no status. A poll that raises says
-    # NOTHING about the resolution, and the loop used to read it as a status
-    # with no autoresolve block in it -- which is exactly the shape of a clean
-    # disarm. So a dead bridge ended the wait with `resolved: true`, and the
-    # orphan pass that runs on that path saw an empty status, took it for "no
-    # combat left", and dropped the begin-combat prompt of a fight that was
-    # still on screen.
+    # NOTHING about the resolution, so it is counted here and never read as a
+    # status: an empty status is the shape of a clean disarm, and taking a
+    # dead bridge for one would report `resolved: true` and let the orphan
+    # pass drop the begin-combat prompt of a fight still on screen.
     lost = 0
     last_lost = None
     # How many of that consecutive run timed out rather than failed. A timeout
@@ -3106,7 +2936,6 @@ def smoke_test(args, progress=None):
     if args.get("scenario"):
         names = [args["scenario"]]
     else:
-        _require("query.scenarios")
         data = bridge.call("query.scenarios") or {}
         # Only the Scenario category names a campaign; the other categories are
         # start options (map size, council count) campaign.new refuses as a
@@ -3123,11 +2952,10 @@ def smoke_test(args, progress=None):
         if progress:
             progress(idx, len(names), "smoke %s" % name)
         # campaign.new refuses while a campaign is loaded, so the loaded one
-        # goes back to the start screen first. That used to be game_stop plus
-        # game_start, which cost a full launch per scenario; main_menu is the
-        # engine's own exit-to-menu path in one process. A relaunch is still
-        # the fallback, for a DLL that has no such verb and for a return that
-        # does not complete.
+        # goes back to the start screen first through main_menu, the engine's
+        # own exit-to-menu path in one process. A relaunch is the fallback,
+        # for a DLL that has no such verb and for a return that does not
+        # complete.
         relaunched = None
         relaunch_error = None
         # Whether this row paid for a menu return. The step runs for a named
@@ -3214,9 +3042,7 @@ def smoke_test(args, progress=None):
                 "back." % e)
         # After the try, so the rows that failed carry the log evidence too.
         # A scenario that raised or lost the bridge is exactly the row a
-        # reader goes looking for an exception on, and it used to be the one
-        # row with no scan on it at all: what the engine wrote on the way down
-        # was collected by nothing and reported nowhere.
+        # reader goes looking for an exception on.
         scan = _scan_logs(marks)
         row["newExceptions"] = scan["failures"]
         # Reported on every row, including the clean ones. An allowlist that
@@ -3238,19 +3064,6 @@ def smoke_test(args, progress=None):
 
 
 # ---------------------------------------------------------------- selftest
-
-def _use_mods(mods):
-    if not isinstance(mods, dict):
-        return None
-    for key in ("useMods", "use_mods"):
-        if key in mods:
-            return mods[key]
-    for key in ("templateMods", "template", "json"):
-        section = mods.get(key)
-        if isinstance(section, dict) and "useMods" in section:
-            return section["useMods"]
-    return None
-
 
 def _mod_info_version():
     """(version, None) from the mod's ModInfo.json, or (None, why-not)."""
@@ -3283,23 +3096,12 @@ def _server_version():
                         "__main__.py")
     try:
         with open(path, "r") as f:
-            tree = ast.parse(f.read(), path)
-    except (OSError, SyntaxError) as e:
+            m = re.search(r'SERVER_INFO\s*=\s*\{[^}]*"version":\s*"([^"]+)"',
+                          f.read())
+    except OSError as e:
         return None, "cannot read SERVER_INFO (%s)" % e
-    for node in tree.body:
-        if not isinstance(node, ast.Assign):
-            continue
-        if not any(isinstance(t, ast.Name) and t.id == "SERVER_INFO"
-                   for t in node.targets):
-            continue
-        try:
-            value = ast.literal_eval(node.value)
-        except ValueError:
-            break
-        if isinstance(value, dict) and value.get("version"):
-            return str(value["version"]), None
-        break
-    return None, "no SERVER_INFO version in %s" % path
+    return (m.group(1), None) if m else \
+        (None, "no SERVER_INFO version in %s" % path)
 
 
 def _version_agreement(dll=None):
@@ -3392,7 +3194,7 @@ def selftest(args, progress=None):
         "note": "unmapped DLL verbs stay reachable through raw"}
 
     mods = _try("mods.list")
-    use = _use_mods(mods)
+    use = mods.get("useMods") if isinstance(mods, dict) else None
     report["useMods"] = use if use is not None else \
         "could not read from mods.list"
     return report
@@ -3417,7 +3219,6 @@ def query(args, progress=None):
         raise ToolError("kind must be one of: %s"
                         % ", ".join(sorted(QUERY_KINDS)))
     verb, allowed = QUERY_KINDS[kind]
-    _require(verb)
     return bridge.call(verb, {k: args[k] for k in allowed if k in args})
 
 
@@ -3444,7 +3245,6 @@ def autopilot(args, progress=None):
         # switches itself off on the first exception in game code unless it
         # was started with ignore_exceptions, so "I sent action=on" is not
         # evidence that it is still on.
-        _require("query.autopilot")
         macro = bridge.call("query.autopilot")
         if isinstance(macro, dict) and macro.get("activated") is False:
             _RUN["macroOn"] = False
@@ -3592,12 +3392,6 @@ def kill_state(args, progress=None):
                               "facility")
 
 
-def _require_call(verb, args):
-    """A verb call that names the fix when the running DLL predates it."""
-    _require(verb)
-    return bridge.call(verb, args)
-
-
 def module_power(args, progress=None):
     """One hab module's power switch, through the verb the Habitats screen's
     own toggle uses.
@@ -3620,12 +3414,12 @@ def module_power(args, progress=None):
         # uses. That error propagates to the caller as isError; let it, rather
         # than duplicating the listing here or dressing a refusal up as a
         # success this one verb alone would return.
-        return _require_call("module.power", {"hab": hab})
+        return bridge.call("module.power", {"hab": hab})
     if not isinstance(args.get("on"), bool):
         raise ToolError("module_power needs on=true (power it up) or on=false "
                         "(shut it down)")
 
-    data = _require_call("module.power", args)
+    data = bridge.call("module.power", args)
     if isinstance(data, dict) and data.get("applied") is False:
         raise ToolError(
             "the engine did not take the setting: asked for powered=%s, the "
@@ -3719,9 +3513,8 @@ def prospect(args, progress=None):
     return _run_console("prospect " + body if body else "revealsites")
 
 
-# Faction hate: one verb, two tools. Reading and writing used to share a tool,
-# which made the read a state-changing call as far as the pause gate is
-# concerned -- so a paused campaign could not be read at all, only refused.
+# Faction hate: one verb, two tools, so the read is not a state-changing call
+# as far as the pause gate is concerned and a paused campaign can be read.
 
 
 def faction_relations(args, progress=None):
@@ -3730,7 +3523,7 @@ def faction_relations(args, progress=None):
         raise ToolError(
             "faction_relations only reads. Set a pair with "
             "set_faction_relation faction=<id> other=<id> hate=<number>")
-    return _require_call("faction.relations", args)
+    return bridge.call("faction.relations", args)
 
 
 def set_faction_relation(args, progress=None):
@@ -3750,7 +3543,7 @@ def set_faction_relation(args, progress=None):
         raise ToolError(
             "set_faction_relation needs hate=<number>, the value the pair is "
             "set to; faction_relations reads what it is now")
-    return _require_call("faction.relations", args)
+    return bridge.call("faction.relations", args)
 
 
 def time_control(args, progress=None):
@@ -3784,7 +3577,6 @@ def campaign_new(args, progress=None):
     fruitless calls would otherwise have the first advance of the NEW campaign
     refused for a stall that belongs to a campaign no longer loaded.
     """
-    _require("campaign.new")
     _reset_run()
     # A campaign with no save behind it. Recorded as such rather than left
     # alone: whatever the run was playing before is not what a crash here
@@ -3802,16 +3594,14 @@ MENU_WAIT = 120
 def main_menu(args, progress=None):
     """Return a loaded campaign to the start screen, in the same process.
 
-    campaign_new is refused while a campaign is loaded, and until this existed
-    the only way back was game_stop plus game_start -- a full relaunch per
-    scenario, which is what smoke_test used to pay.
+    campaign_new is refused while a campaign is loaded; this is the way back
+    without a full relaunch.
 
     The verb answers as soon as it has asked the engine to go; the campaign
     unloads over the following frames. So the waiting is here, and what it
     waits for is the bridge reporting no campaign, which is the same condition
     campaign_new tests.
     """
-    _require("game.main_menu")
     seconds = _wait_secs(args.get("wait"), MENU_WAIT)
     if not _campaign_loaded():
         return {"campaign": False,
@@ -3857,7 +3647,7 @@ def save_game(args, progress=None):
     name = args.get("name")
     if not name:
         raise ToolError("save_game needs name=<save>")
-    out = _require_call("saves.save", {"name": name})
+    out = bridge.call("saves.save", {"name": name})
     _RUN["save"] = {"name": name,
                     "extension": _extension_of(out)}
     # The campaign is up and its token is the one this save belongs to. Bound
@@ -3926,11 +3716,9 @@ def prompts(args, progress=None):
 def assets(args, progress=None):
     action = args.get("action")
     if action == "list":
-        _require("assets.bundles")
         a = {"bundle": args["path"]} if args.get("path") else {}
         return bridge.call("assets.bundles", a)
     if action == "resolve":
-        _require("assets.resolve")
         if not args.get("path"):
             raise ToolError("resolve needs path='bundle/asset'")
         return bridge.call("assets.resolve", {"path": args["path"]})
@@ -3976,35 +3764,6 @@ def _shot_attempts(outdir, path):
 SHOT_WAIT = 8.0         # seconds per supersize step to appear and settle
 SHOT_POLL = 0.15
 
-# The last components of persistentDataPath, which both sides must agree on:
-# <...>/AppData/LocalLow/Pavonis Interactive/TerraInvicta.
-_SHOT_DIR_TAIL = 4
-
-
-def _persistent_drift(reported):
-    """None when the verb's own persistentDataPath and this side's agree,
-    else the mismatch as a fallback reason.
-
-    Compared by tail components only: inside the game that path is a Windows
-    path (under Proton, inside the Wine prefix), out here it is a POSIX one,
-    so the prefixes are legitimately different and only the tail is shared.
-    """
-    if not reported:
-        return None
-
-    def tail(p):
-        parts = [x for x in str(p).replace("\\", "/").split("/") if x]
-        return [x.lower() for x in parts[-_SHOT_DIR_TAIL:]]
-
-    if tail(reported) == tail(bridge.PERSISTENT_DIR):
-        return None
-    return ("ui.screenshot (the game's persistentDataPath is %s but this side "
-            "derives %s from the game folder, so the capture exists and is not "
-            "where the server looks; the derivation assumes the stock Proton "
-            "prefix at steamapps/compatdata/1176470)"
-            % (reported, bridge.PERSISTENT_DIR))
-
-
 def _bridge_screenshot():
     """In-engine capture through ui.screenshot: (PNG bytes, None), or
     (None, why-not) to fall back to the desktop tools.
@@ -4020,15 +3779,6 @@ def _bridge_screenshot():
     rel = data.get("relativePath")
     if not rel:
         return None, "ui.screenshot (reply carried no relativePath)"
-    # The verb writes under persistentDataPath as the game process sees it;
-    # this side reconstructs that directory from the prefix layout. If the two
-    # ever name different places (a moved prefix, another Steam library, a
-    # Windows profile that is not the one running the game) the file is real
-    # and simply not where this looks -- which must be said, not silently
-    # turned into a desktop grab of whatever window is on top.
-    drift = _persistent_drift(data.get("dir"))
-    if drift:
-        return None, drift
     path = os.path.join(bridge.PERSISTENT_DIR, *rel.split("/"))
     deadline = _time.monotonic() + SHOT_WAIT * max(1, int(data.get("supersize") or 1))
     size = -1
@@ -4095,12 +3845,10 @@ def screenshot(args, progress=None):
             if not os.path.isfile(candidate):
                 candidate = path
             if not os.path.isfile(candidate):
-                files = [os.path.join(outdir, f) for f in os.listdir(outdir)]
-                candidate = max(files, key=os.path.getmtime) if files else None
-            if candidate:
-                got = candidate
-                break
-            tried.append("%s (exit 0 but wrote no file)" % name)
+                tried.append("%s (exit 0 but wrote no file)" % name)
+                continue
+            got = candidate
+            break
         if not got:
             raise ToolError("screenshot failed; tried: %s" % "; ".join(tried))
         with open(got, "rb") as f:
@@ -4159,7 +3907,7 @@ def ui_view(args, progress=None):
             "ui_view needs view=SolarSystem or view=PoliticalMap. To read the "
             "current view and the active scene without moving anything, call "
             "ui_status")
-    return _require_call("ui.view", args)
+    return bridge.call("ui.view", args)
 
 
 def ui_screen(args, progress=None):
@@ -4178,7 +3926,7 @@ def ui_screen(args, progress=None):
         raise ToolError(
             "manage is the second argument of HabDetailRequested and means "
             "nothing without one: pass it beside hab=<id>, or leave it out")
-    return _require_call("ui.screen", args)
+    return bridge.call("ui.screen", args)
 
 
 def ui_status(args, progress=None):
@@ -4188,8 +3936,8 @@ def ui_status(args, progress=None):
     active Unity scene; ui.screen has the screens this campaign registered and
     which of them is up.
     """
-    view = _require_call("ui.view", {})
-    screen = _require_call("ui.screen", {"list": True})
+    view = bridge.call("ui.view", {})
+    screen = bridge.call("ui.screen", {"list": True})
     out = {}
     if isinstance(view, dict):
         # `changed` is the drive's own read-back and is false on every read.

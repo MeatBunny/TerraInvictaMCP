@@ -116,12 +116,6 @@ def reply(msg_id, result=None, error=None):
     sys.stdout.flush()
 
 
-def notify(method, params):
-    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "method": method,
-                                 "params": params}) + "\n")
-    sys.stdout.flush()
-
-
 def make_progress(token):
     def progress(current, total=None, message=None):
         params = {"progressToken": token, "progress": current}
@@ -129,7 +123,10 @@ def make_progress(token):
             params["total"] = total
         if message:
             params["message"] = message
-        notify("notifications/progress", params)
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0",
+                                     "method": "notifications/progress",
+                                     "params": params}) + "\n")
+        sys.stdout.flush()
     return progress
 
 
@@ -180,7 +177,7 @@ def handle(msg):
         uri = params.get("uri", "")
         try:
             reply(msg_id, resources.read_resource(uri))
-        except (KeyError, TypeError):
+        except KeyError:
             reply(msg_id, error={"code": -32002,
                                  "message": "resource not found: %s" % (uri,)})
         except OSError as e:

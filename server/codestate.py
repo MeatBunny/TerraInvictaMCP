@@ -29,8 +29,8 @@ import time
 # since the server process never loads a test.
 SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Absolute path -> sha256 of the bytes this process loaded, or None when the
-# file could not be read at that moment. Written once per path by note().
+# Absolute path -> sha256 of the bytes this process loaded. Written once per
+# path by note().
 _RECORDED = {}
 
 _STARTED = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -43,19 +43,12 @@ FIX = ("Reconnect this MCP server in the client (Claude Code: /mcp, then "
 
 
 def _digest(path):
-    h = hashlib.sha256()
     with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
+        return hashlib.sha256(f.read()).hexdigest()
 
 
 def _loaded_files():
-    """Absolute paths of this server's own .py files loaded in this process.
-
-    sys.modules is copied before the walk: an import on another thread would
-    otherwise resize the dict mid-iteration and raise.
-    """
+    """Absolute paths of this server's own .py files loaded in this process."""
     found = []
     for module in list(sys.modules.values()):
         path = getattr(module, "__file__", None)
@@ -79,10 +72,7 @@ def note():
     for path in _loaded_files():
         if path in _RECORDED:
             continue
-        try:
-            _RECORDED[path] = _digest(path)
-        except OSError:
-            _RECORDED[path] = None
+        _RECORDED[path] = _digest(path)
         new.append(path)
     return new
 
@@ -95,32 +85,14 @@ def drift():
     rows = []
     for path in sorted(_RECORDED):
         name = os.path.join("server", os.path.basename(path))
-        recorded = _RECORDED[path]
-        if recorded is None:
-            rows.append((name, "was unreadable when this process loaded it, "
-                               "so it cannot be compared"))
-            continue
         try:
             current = _digest(path)
         except OSError as e:
             rows.append((name, "is gone or unreadable now (%s)" % e))
             continue
-        if current != recorded:
+        if current != _RECORDED[path]:
             rows.append((name, "changed on disk"))
     return rows
-
-
-def unverified():
-    """Loaded server files with no record, sorted by name.
-
-    A module imported after the last note() loaded whatever was on disk at
-    that moment, and nothing here saw it happen, so it can be neither cleared
-    nor accused. Dispatch calls note() before every tool call, so this is
-    empty in the running server and non-empty only in a harness that imported
-    a module and never dispatched.
-    """
-    return sorted(os.path.join("server", os.path.basename(p))
-                  for p in _loaded_files() if p not in _RECORDED)
 
 
 def stale():
@@ -136,11 +108,6 @@ def stale():
                _STARTED, FIX))
 
 
-def verdict():
-    """selftest's line: running code against the files it came from."""
-    return check()[0]
-
-
 def check():
     """(line, failed): the verdict sentence and whether it is a failure.
 
@@ -150,13 +117,5 @@ def check():
     bad = stale()
     if bad:
         return bad, True
-    line = ("current -- %d loaded server file(s) match the bytes this "
-            "process read at %s" % (len(_RECORDED), _STARTED))
-    missed = unverified()
-    if missed:
-        line += (", and %s came in after the last snapshot and were not "
-                 "checked" % ", ".join(missed))
-    return line, False
-
-
-note()
+    return ("current -- %d loaded server file(s) match the bytes this "
+            "process read at %s" % (len(_RECORDED), _STARTED)), False

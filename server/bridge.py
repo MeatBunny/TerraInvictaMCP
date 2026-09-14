@@ -132,36 +132,10 @@ def resolve_port(cli_override=None):
 _ids = itertools.count(1)
 _verb_cache = None
 
-# The last clock stall the DLL reported, and when this process read it. Every
-# response envelope carries `clockStall`, so a session's ordinary traffic keeps
-# this fresh for nothing: the pause limit reads it here instead of asking the
-# game on every tool call.
-#
-# `seconds` is None when there is nothing to measure -- no campaign loaded, or
-# a DLL older than the key -- and that is deliberately indistinguishable from
-# "unknown", because both mean the limit has nothing to enforce. `at` is the
-# monotonic time of the last reply of any kind, set even when the key was
-# absent, so an old DLL is asked once and then left alone.
+# Last clockStall / campaignToken / campaignProcess seen on any envelope.
+# None = nothing to measure (no campaign, or an old DLL); the token is not
+# remembered across a gap, the process key is.
 _stall = {"seconds": None, "at": None}
-
-# The campaign token from the last envelope that carried one. Minted by the
-# DLL, it changes on every transition into a campaign, so a client that never
-# ordered the transition still sees it: the in-game exit to the menu and a
-# campaign started from the start screen go through no verb of ours.
-#
-# None means no information -- no campaign loaded, or a DLL older than the key
-# -- and it is deliberately not remembered as a value. A campaign that ends
-# says nothing about which campaign comes next, and treating the gap as a
-# change would reset a run's counters twice for one swap.
-#
-# `process` is the token's prefix, sent on its own key by the DLL. It is minted
-# once at mod load, so it is the same string on every envelope a game process
-# ever sends and a different one from the next game. It is what tells a new
-# campaign from a new GAME: the counter behind the prefix restarts at 1 in each
-# process, so a token alone cannot say that the game was replaced by someone at
-# the console rather than by this server. Unlike the token it is carried
-# between campaigns too, since the process is there whether a campaign is or
-# not.
 _campaign = {"token": None, "process": None}
 
 
@@ -260,33 +234,21 @@ def send(request, timeout=TIMEOUT, port=None):
         _check_reply(request, resp)
         _note_stall(resp)
         return resp
-    except socket.timeout:
-        # Caught ahead of OSError, which it inherits from. On loopback a closed
-        # port is refused instantly rather than timing out, so this is the
-        # accepted-but-unanswered case: the game is up and its main thread is
-        # busy.
+    except (socket.timeout, BridgeError, OSError, UnicodeDecodeError,
+            json.JSONDecodeError) as e:
+        # A failed call discards the cached verb set and the stall reading:
+        # whatever it reached is not the bridge the cache described.
+        # UnicodeDecodeError is a ValueError, so OSError does not cover it.
         _verb_cache = None
         clear_stall()
-        raise BridgeTimeout("no reply within %.0fs (the game's main thread is "
-                            "busy; the process is up)" % timeout)
-    except BridgeError:
-        # The EOF and shape failures raised above. They are failed calls like
-        # any other, so they discard the same state: a raise that skipped this
-        # left a cached verb set describing a bridge this call never reached.
-        _verb_cache = None
-        clear_stall()
-        raise
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
-        # A later reconnect may reach a restarted game with a different DLL;
-        # drop the cached verb set so it gets re-detected. The stall goes with
-        # it: a call that reached nothing has learned that the last reading is
-        # no longer current, and a stale one would have the pause limit refuse
-        # calls over a clock in a game that is not running any more.
-        # UnicodeDecodeError is in the tuple because the socket is read as
-        # text: bytes that are not UTF-8 raise it, and it is a ValueError, so
-        # OSError does not cover it.
-        _verb_cache = None
-        clear_stall()
+        if isinstance(e, socket.timeout):
+            # Ahead of OSError, which it inherits from. On loopback a closed
+            # port is refused instantly, so this is the game up with its main
+            # thread busy.
+            raise BridgeTimeout("no reply within %.0fs (the game's main "
+                                "thread is busy; the process is up)" % timeout)
+        if isinstance(e, BridgeError):
+            raise
         raise BridgeError(str(e))
 
 
@@ -316,24 +278,8 @@ def verbs(refresh=False):
     clears on any transport failure, so a reconnect re-detects."""
     global _verb_cache
     if _verb_cache is None or refresh:
-        _verb_cache = _verb_names(call("verbs"))
+        _verb_cache = {v["name"] for v in call("verbs")["verbs"]}
     return _verb_cache
-
-
-def _verb_names(data):
-    if isinstance(data, dict):
-        data = data.get("verbs", data)
-    if isinstance(data, dict):
-        return set(data)
-    names = set()
-    for item in data or []:
-        if isinstance(item, str):
-            names.add(item)
-        elif isinstance(item, dict):
-            name = item.get("verb") or item.get("name") or item.get("cmd")
-            if name:
-                names.add(name)
-    return names
 
 
 def tail_log(count=50, pattern=None, path=None):
