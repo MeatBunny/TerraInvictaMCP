@@ -1988,19 +1988,24 @@ def check_locale(session, only_mod, scenario, verbose):
 
         # Differential coverage through the engine.
         if online:
+            # A key that resolves nowhere is a finding only where the offline
+            # branch would report it: a new entry of a class vanilla keys.
             want = []
             for cls, dns in sorted(touched.items()):
+                van, _ = vanilla_entries(cls + ".json")
+                keyed = _class_requires_display_name(cls)
                 for dn in sorted(dns):
+                    entry = (uni.classes.get(cls) or {}).get(dn)
+                    required = keyed and van is not None and dn not in van
                     for field in ("displayName", "description"):
-                        want.append((mod.name, cls, dn, field,
-                                     "%s.%s.%s" % (cls, field, dn)))
-            for i in range(0, len(want), 100):
-                chunk = want[i:i + 100]
-                keys = [w[4] for w in chunk]
-                if postfix:
-                    keys += [k + postfix for k in keys]
+                        for key in _loc_keys(cls, field, dn, entry):
+                            want.append((mod.name, field, key, required))
+            # The DLL takes at most 200 keys per call.
+            for i in range(0, len(want), 200):
+                chunk = want[i:i + 200]
                 try:
-                    resp = session.call("query.localize", keys=keys)
+                    resp = session.call("query.localize",
+                                        keys=[w[2] for w in chunk])
                 except session.bridge.BridgeError as e:
                     degraded.append("bridge stopped answering: %s" % e)
                     online = False
@@ -2012,51 +2017,53 @@ def check_locale(session, only_mod, scenario, verbose):
                 got = {r.get("key"): r for r in
                        (resp["data"] if isinstance(resp["data"], list)
                         else resp["data"].get("results") or [])}
-                for mname, cls, dn, field, key in chunk:
+                for mname, field, key, required in chunk:
                     checked_keys += 1
                     r = got.get(key)
-                    if r is None:
+                    if r is None or (r.get("found") and
+                                     not r.get("fellBack")):
+                        continue
+                    if not r.get("found") and not required:
                         continue
                     if r.get("fellBack"):
-                        sev = "MISMATCH" if field == "displayName" else "WARN"
-                        item = _finding(
-                            mod=mname, verdict=sev, kind="fellBack", key=key,
-                            detail="%s did not resolve; the engine fell back"
-                                   % key,
-                            nextStep="add the key to the mod's .en file (and "
-                                     "the scenario-postfixed variant when the "
-                                     "entry is scenario content)")
-                        (verdicts if sev == "MISMATCH" else warnings).append(
-                            item if sev == "MISMATCH" else
-                            _finding(mod=mname, warning=item["detail"], key=key,
-                                     nextStep=item["nextStep"]))
-                    if postfix:
-                        pr = got.get(key + postfix)
-                        if pr is not None and pr.get("fellBack"):
-                            warnings.append(_finding(
-                                mod=mname, key=key + postfix,
-                                warning="scenario-postfixed key fell back to "
-                                        "the base text under %s" % scenario,
-                                nextStep="add the postfixed key if the "
-                                         "scenario needs different text"))
+                        kind = "fellBack"
+                        why = "did not resolve; the engine fell back"
+                    else:
+                        kind = "missingKey"
+                        why = "resolves nowhere in the engine"
+                    sev = "MISMATCH" if field == "displayName" else "WARN"
+                    item = _finding(
+                        mod=mname, verdict=sev, kind=kind, key=key,
+                        detail="%s %s" % (key, why),
+                        nextStep="add the key to the mod's .en file (and "
+                                 "the scenario-postfixed variant when the "
+                                 "entry is scenario content)")
+                    (verdicts if sev == "MISMATCH" else warnings).append(
+                        item if sev == "MISMATCH" else
+                        _finding(mod=mname, warning=item["detail"],
+                                 kind=kind, key=key,
+                                 nextStep=item["nextStep"]))
         else:
             # Offline approximation: keys present in the mod's own .en file.
             for cls, dns in sorted(touched.items()):
+                keyed = _class_requires_display_name(cls)
                 van, _ = vanilla_entries(cls + ".json")
                 van_loc = _vanilla_loc_keys(cls)
+                have = set(mod_keys) | van_loc
                 for dn in sorted(dns):
                     new_entry = van is not None and dn not in van
-                    key = "%s.displayName.%s" % (cls, dn)
-                    checked_keys += 1
-                    if new_entry and key not in mod_keys and \
-                            key not in van_loc:
+                    keys = _loc_keys(cls, "displayName", dn,
+                                     (uni.classes.get(cls) or {}).get(dn))
+                    checked_keys += len(keys)
+                    for key in ([k for k in keys if k not in have]
+                                if new_entry and keyed else ()):
                         verdicts.append(_finding(
                             mod=mod.name, verdict="MISMATCH", kind="missingKey",
                             key=key,
                             detail="new entry %s/%s has no displayName key in "
                                    "the mod's .en file or vanilla" % (cls, dn),
                             nextStep="add %s=... to the mod's .en file" % key))
-                    if postfix:
+                    for key in (keys if postfix else ()):
                         pkey = key + postfix
                         if pkey in mod_keys and key not in mod_keys and \
                                 key not in van_loc:
@@ -2093,7 +2100,45 @@ def _class_is_localized(cls):
         cls + ".en"))
 
 
+def _loc_name(dn, entry):
+    """The name the engine keys localization on: localizationAlias when the
+    entry sets one (the DLC scenarios do), else the dataName."""
+    return (entry or {}).get("localizationAlias") or dn
+
+
+def _loc_keys(cls, field, dn, entry):
+    """The keys the engine reads for one field of one entry. An objective
+    reads the bare key when its objectiveType is General and
+    <bare>.<faction> for each of its factionDataNames otherwise; every other
+    class reads the bare key."""
+    entry = entry or {}
+    base = "%s.%s.%s" % (cls, field, _loc_name(dn, entry))
+    if cls == "TIObjectiveTemplate" and \
+            entry.get("objectiveType") != "General":
+        return ["%s.%s" % (base, f)
+                for f in entry.get("factionDataNames") or []]
+    return [base]
+
+
 _VAN_LOC_CACHE = {}
+_DISPLAY_NAME_CACHE = {}
+DISPLAY_NAME_COVERAGE = 0.9
+
+
+def _class_requires_display_name(cls):
+    """True when vanilla localizes a displayName for at least
+    DISPLAY_NAME_COVERAGE of the class's entries. A class vanilla leaves more
+    than a tenth of unlocalized (effects, metas, orgs, armies) gets no
+    missingKey verdicts; fallen-back keys are still reported online."""
+    if cls not in _DISPLAY_NAME_CACHE:
+        van, _ = vanilla_entries(cls + ".json")
+        have = _vanilla_loc_keys(cls)
+        ok = sum(1 for dn, e in (van or {}).items()
+                 if all(k in have
+                        for k in _loc_keys(cls, "displayName", dn, e)))
+        _DISPLAY_NAME_CACHE[cls] = bool(van) and \
+            ok / len(van) >= DISPLAY_NAME_COVERAGE
+    return _DISPLAY_NAME_CACHE[cls]
 
 
 def _vanilla_loc_keys(cls):

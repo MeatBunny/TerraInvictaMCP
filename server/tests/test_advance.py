@@ -1776,5 +1776,24 @@ class SaveGameRecordTest(unittest.TestCase):
         self.assertEqual(compose._RUN["saveToken"], "a-1")
 
 
+class PromptsDropTest(unittest.TestCase):
+    """prompts mode=drop sends `all`, and `narrative` only when asked off."""
+
+    def _drop(self, **kw):
+        fake = FakeBridge(CLEAR)
+        with mock.patch.object(compose, "bridge", fake):
+            compose.prompts(dict(mode="drop", **kw))
+        return fake.dismiss_args
+
+    def test_narrative_off_is_passed_through(self):
+        self.assertEqual(self._drop(narrative_events=False),
+                         [{"all": True, "narrative": False}])
+
+    def test_default_sends_all_and_no_narrative_key(self):
+        sent = self._drop()
+        self.assertEqual(sent, [{"all": True}])
+        self.assertNotIn("narrative", sent[0])
+
+
 if __name__ == "__main__":
     unittest.main()

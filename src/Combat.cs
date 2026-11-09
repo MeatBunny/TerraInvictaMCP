@@ -810,6 +810,53 @@ namespace TerraInvictaMCP
             autoFiredAccept = false;
         }
 
+        // Writes the history a failed arm would have left, so the one-shot refusals in
+        // UnsafeRearmReason can be exercised. They guard against applying a battle twice
+        // and there is no other way to reach them: producing one for real means firing
+        // the engine call whose second firing is the corruption.
+        static JToken TestAutoresolveFault(JObject args)
+        {
+            string kind = Str(args, "kind");
+            // Ahead of the clear branch as well: a live machine sets the one-shot flags
+            // itself, and clearing them under it is the double-apply this guards.
+            if (autoPhase != AutoPhase.Idle)
+                throw new VerbError("autoresolve is armed on combat " + autoCombatId
+                    + "; disarm it before writing history");
+            if (kind == "clear")
+            {
+                ResetHistory();
+                autoError = null;
+                autoNote = null;
+                return AutoresolveStatus(null);
+            }
+
+            TISpaceCombatState combat = TargetCombat(args);
+            if (combat == null) throw new VerbError("no combat");
+            if (kind != "accept" && kind != "select")
+                throw new VerbError("unknown kind '" + kind + "' (accept, select, clear)");
+            // The arm returns early on an AI-only combat, before RefuseUnsafeRearm, so
+            // history written here would report a refusal that can never be made.
+            if (Initialized(combat) && !PlayerInvolved(combat))
+                throw new VerbError("combat " + (int)combat.ID + " has no player faction "
+                    + "in it, so combat.autoresolve returns before the re-arm guard and "
+                    + "the injected history would never refuse anything");
+
+            autoHistoryCombatId = (int)combat.ID;
+            autoFiredAccept = kind == "accept";
+            autoFiredSelect = kind == "select";
+            autoReached = autoFiredAccept ? AutoPhase.Closing : AutoPhase.Simulating;
+            autoErrorKind = AutoFail.Unknown;
+            autoAttempts = 1;
+            autoError = "injected by test.autoresolve_fault";
+
+            var o = new JObject();
+            o["combat"] = Describe(combat);
+            o["injected"] = kind;
+            o["retryable"] = Retryable(combat);
+            o["reason"] = UnsafeRearmReason((int)combat.ID);
+            return o;
+        }
+
         // Optional client stance override: {"stance": "Pursue"}. Validated against the
         // enum here and against allowedStances at submit time.
         static int ParseStance(JObject args)

@@ -2,8 +2,10 @@
 # an installed Unity Mod Manager (its UnityModManager/0Harmony live under the
 # game's Managed folder).
 #
-# Compiler probe order: Mono's mcs on PATH, then a Roslyn csc on PATH. The
-# pre-Roslyn .NET Framework csc (C# 5 at most) is refused; see -Help.
+# Compiler probe order: Mono's mcs on PATH, a Roslyn csc on PATH, the Visual
+# Studio / Build Tools csc.exe via vswhere, then the .NET SDK's csc.dll run
+# through dotnet. The pre-Roslyn .NET Framework csc (C# 5 at most) is refused;
+# see -Help.
 #
 # -nostdlib against the game's own assemblies is deliberate: a system C#
 # profile places some BCL types in different assemblies than Unity's Mono, and a
@@ -25,11 +27,12 @@ script (Mods\Enabled\TerraInvictaMCP\), which is where the game loads it from.
 Restart the game to pick up a new build.
   -Help        this message
 Requirements:
-  a C# compiler on PATH: Mono's mcs, or a Roslyn csc (the one shipped with
-  Visual Studio, the Build Tools, or the .NET SDK). A pre-Roslyn csc found on
-  PATH (the in-box .NET Framework compiler) is detected and REFUSED: it
-  accepts C# 5 at most and the sources use C# 6, so it can only produce
-  syntax errors that name the wrong problem.
+  a C# compiler: Mono's mcs or a Roslyn csc on PATH, or Visual Studio /
+  Build Tools (MSBuild's Roslyn\csc.exe, located through vswhere.exe), or the
+  .NET SDK (<sdk>\Roslyn\bincore\csc.dll, run through dotnet on PATH).
+  A pre-Roslyn csc found on PATH (the in-box .NET Framework compiler) is
+  detected and REFUSED: it accepts C# 5 at most and the sources use C# 6, so
+  it can only produce syntax errors that name the wrong problem.
   a Terra Invicta install with Unity Mod Manager already installed: the build
   references the game's own assemblies under TerraInvicta_Data\Managed,
   including UnityModManager\UnityModManager.dll and 0Harmony.dll.
@@ -97,8 +100,8 @@ if ($Src.Count -eq 0) { Write-Host "no .cs under $SrcDir"; exit 2 }
 
 # Roslyn's csc prints a version and exits 0. The pre-Roslyn .NET Framework
 # compiler does not know the switch: it exits nonzero with error CS2007.
-function Test-RoslynCsc($Path) {
-    $out = & $Path -version 2>&1
+function Test-RoslynCsc($Path, [string[]]$Prefix = @()) {
+    $out = & $Path @Prefix -version 2>&1
     if ($LASTEXITCODE -ne 0) { return $false }
     return (($out -join " ") -match '\d+\.\d+')
 }
@@ -106,8 +109,10 @@ function Test-RoslynCsc($Path) {
 # Compiler probe. Get-Command honours PATHEXT, so a .cmd/.bat shim resolves the
 # same as a native .exe.
 $Compiler = $null
+$Prefix   = @()        # arguments before the compiler's own (the csc.dll for dotnet)
 $Kind     = $null
 $Refused  = $null      # a pre-Roslyn csc that was found and will not be used
+$NoSdk    = $null      # a dotnet that turned out to be runtime-only
 $Found = Get-Command mcs -ErrorAction SilentlyContinue
 if ($Found) { $Compiler = $Found.Source; $Kind = "mcs" }
 if (-not $Compiler) {
@@ -117,6 +122,27 @@ if (-not $Compiler) {
         else { $Refused = $Found.Source }
     }
 }
+if (-not $Compiler -and ${env:ProgramFiles(x86)}) {
+    $VsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $VsWhere) {
+        $Found = & $VsWhere -latest -products * -requires Microsoft.Component.MSBuild -find "MSBuild\**\Bin\Roslyn\csc.exe" 2>$null |
+            Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+        if ($Found) { $Compiler = $Found; $Kind = "csc" }
+    }
+}
+if (-not $Compiler) {
+    $Dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
+    if ($Dotnet) {
+        $Sdk = @(& $Dotnet.Source --list-sdks 2>$null) | Select-Object -Last 1
+        if (-not $Sdk) { $NoSdk = $Dotnet.Source }   # runtime-only install: no SDK, no csc.dll
+        if ($Sdk -match '^(\S+) \[(.+)\]$') {
+            $Dll = Join-Path (Join-Path (Join-Path $Matches[2] $Matches[1]) "Roslyn\bincore") "csc.dll"
+            if ((Test-Path $Dll) -and (Test-RoslynCsc $Dotnet.Source @($Dll))) {
+                $Compiler = $Dotnet.Source; $Prefix = @($Dll); $Kind = "csc"
+            }
+        }
+    }
+}
 if (-not $Compiler) {
     Write-Host "no usable C# compiler found."
     if ($Refused) {
@@ -124,7 +150,11 @@ if (-not $Compiler) {
         Write-Host "  It is the .NET Framework C# 5 compiler, and this mod's source uses C# 6"
         Write-Host "  (nameof), so it cannot build it. Not invoked."
     }
-    Write-Host "  Looked for: mcs on PATH, a Roslyn csc on PATH."
+    if ($NoSdk) {
+        Write-Host "  $NoSdk has runtimes only; dotnet --list-sdks lists no SDK, so no csc.dll."
+    }
+    Write-Host "  Looked for: mcs on PATH, a Roslyn csc on PATH, Visual Studio / Build Tools"
+    Write-Host "  (vswhere.exe), the .NET SDK (dotnet --list-sdks)."
     Write-Host "Fix: install Mono (mono-project.com), or a modern C# compiler (Visual Studio"
     Write-Host "Build Tools, or the .NET SDK's Roslyn csc), or just use the prebuilt"
     Write-Host "TerraInvictaMCP.dll that ships with the mod and skip building."
@@ -142,8 +172,8 @@ if ($Kind -eq "mcs") {
 }
 $CArgs += $Src.FullName
 
-Write-Host "Compiling $($Src.Count) source file(s) with $Compiler"
-& $Compiler @CArgs
+Write-Host "Compiling $($Src.Count) source file(s) with $(@($Compiler) + $Prefix -join ' ')"
+& $Compiler @Prefix @CArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Host "build FAILED (exit $LASTEXITCODE)"
     exit 1

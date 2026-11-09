@@ -149,6 +149,24 @@ def vanilla_templates():
             {"dataName": "Effect_Boost", "operation": "Additive", "value": 1,
              "effectTarget": "SourceFaction", "contexts": ["Research"]},
         ],
+        # Vanilla localizes a General objective under the bare key and every
+        # other objective per faction; mining profiles are localized for only
+        # one of the two entries, so the class is exempt from the offline
+        # displayName requirement.
+        "TIObjectiveTemplate.json": [
+            {"dataName": "Objective_Faction", "objectiveType": "Campaign",
+             "starter": True,
+             "factionDataNames": ["ResistCouncil", "EscapeCouncil"]},
+            {"dataName": "Objective_Bare", "objectiveType": "General",
+             "starter": False,
+             "factionDataNames": ["ResistCouncil", "EscapeCouncil"]},
+        ],
+        "TIMiningProfileTemplate.json": [
+            {"dataName": "Mine_Carbon", "friendlyName": "Carbon",
+             "modifyBySize": True, "water_mean": 35},
+            {"dataName": "Mine_Metal", "friendlyName": "Metal",
+             "modifyBySize": True, "metals_mean": 60},
+        ],
         "TICouncilorAppearanceTemplate.json": [
             {"dataName": "Appearance_One", "string": "M_EUR_01",
              "enable": True, "allowedGenders": ["Male", "Nonbinary"],
@@ -202,6 +220,12 @@ def vanilla_localization():
             "TIGunTemplate", ["Gun_Coilgun", "Gun_Railgun"]),
         "TIEffectTemplate.en": _loc_lines(
             "TIEffectTemplate", ["Effect_Boost"]),
+        "TIObjectiveTemplate.en": _loc_lines(
+            "TIObjectiveTemplate", ["Objective_Faction.ResistCouncil",
+                                    "Objective_Faction.EscapeCouncil",
+                                    "Objective_Bare"]),
+        "TIMiningProfileTemplate.en": _loc_lines(
+            "TIMiningProfileTemplate", ["Mine_Carbon"]),
     }
 
 
@@ -298,6 +322,7 @@ class ModcheckTestCase(unittest.TestCase):
         # previous case's parsed content.
         modcheck._VANILLA_CACHE.clear()
         modcheck._VAN_LOC_CACHE.clear()
+        modcheck._DISPLAY_NAME_CACHE.clear()
         # A new instance, not a field reset: _cache_tried left at True turns a
         # case that ships an enum cache into a case with no table.
         modcheck.ENUMS = modcheck.EnumTable()

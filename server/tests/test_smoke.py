@@ -135,10 +135,15 @@ class SweepBridge:
     has other scenarios still to test. Once down, every `call` raises.
     """
 
-    def __init__(self, scenarios, logs, dies_on=None, error=None):
+    def __init__(self, scenarios, logs, dies_on=None, error=None,
+                 refuse_first=0, refuse_with="start menu is not initialized"):
         self.scenarios = list(scenarios)
         self.logs = logs
         self.dies_on = dies_on
+        # How many campaign.new calls are refused, and with what text, the
+        # way a start scene still loading refuses before it changes anything.
+        self.refuse_first = refuse_first
+        self.refuse_with = refuse_with
         self.error = error or bridge.BridgeError("connection refused")
         self.down = False
         self.campaign = False
@@ -180,6 +185,9 @@ class SweepBridge:
             if (args or {}).get("scenario") == self.dies_on:
                 self.down = True
                 raise self.error
+            if self.refuse_first:
+                self.refuse_first -= 1
+                raise bridge.VerbError(self.refuse_with)
             self.campaign = True
             return {"started": (args or {}).get("scenario")}
         return {}
@@ -277,6 +285,32 @@ class SweepResilienceTest(unittest.TestCase):
             return compose.smoke_test(dict(args or {}, days=1))
 
     # ------------------------------------------------------------ the sweep
+
+    def test_a_start_scene_still_loading_is_waited_out(self):
+        out = self._run(refuse_first=2)
+        self.assertTrue(all(r["ok"] for r in out["results"]))
+        self.assertEqual(self.fake.count("campaign.new"),
+                         len(self.SCENARIOS) + 2)
+
+    def test_a_start_scene_that_never_comes_up_is_the_row_error(self):
+        out = self._run(refuse_first=compose.HANDOFF_TRIES)
+        row = out["results"][0]
+        self.assertIn("start menu is not initialized", row["error"])
+        self.assertEqual(row["reached"], "campaign.new")
+
+    def test_other_refusals_are_not_retried(self):
+        self.fake = SweepBridge(self.SCENARIOS, self.logs, refuse_first=1,
+                                refuse_with="a campaign is loaded already")
+        with mock.patch.object(compose, "bridge", self.fake), \
+                self.assertRaises(bridge.VerbError):
+            compose.campaign_new({"scenario": "Scenario_A"})
+        self.assertEqual(self.fake.count("campaign.new"), 1)
+
+    def test_a_retried_handoff_says_so(self):
+        self.fake = SweepBridge(self.SCENARIOS, self.logs, refuse_first=1)
+        with mock.patch.object(compose, "bridge", self.fake):
+            reply = compose.campaign_new({"scenario": "Scenario_A"})
+        self.assertEqual(reply["handoffRetries"], 1)
 
     def test_a_clean_sweep_is_one_row_per_scenario_and_passes(self):
         # The guard on everything below: the resilience wrapper must not

@@ -1543,6 +1543,8 @@ def _observe(args, progress=None):
             report["combat"] = summary
 
     factions = _try("query.factions")
+    if isinstance(factions, dict):
+        factions = factions.get("items")
     if isinstance(factions, list):
         for f in factions:
             if isinstance(f, dict) and f.get("activePlayer"):
@@ -3187,9 +3189,9 @@ def selftest(args, progress=None):
 # ---------------------------------------------------------------- wrappers
 
 QUERY_KINDS = {
-    "factions": ("query.factions", ()),
-    "habs": ("query.habs", ("faction",)),
-    "fleets": ("query.fleets", ("faction",)),
+    "factions": ("query.factions", ("limit",)),
+    "habs": ("query.habs", ("faction", "limit")),
+    "fleets": ("query.fleets", ("faction", "limit")),
     "designs": ("query.designs", ("faction", "limit")),
     "scenarios": ("query.scenarios", ()),
     "councilors": ("query.councilors", ("faction", "limit")),
@@ -3209,9 +3211,28 @@ def query(args, progress=None):
 def console(args, progress=None):
     if not args.get("line"):
         raise ToolError("console needs line=<command>")
-    if args.get("select") is not None:
-        bridge.call("select", {"id": args["select"]})
-    return bridge.call("console", {"line": args["line"]})
+    limit = args.get("limit")
+    if limit is not None and (not isinstance(limit, int)
+                              or isinstance(limit, bool) or limit < 1):
+        raise ToolError("limit must be an integer >= 1")
+    try:
+        pattern = re.compile(args["contains"]) if args.get("contains") else None
+    except re.error as e:
+        raise ToolError("contains is not a valid regex: %s" % e)
+    reply = _run_console(args["line"], select=args.get("select"),
+                         guard=False)["output"]
+    if not isinstance(reply, dict):
+        return reply
+    lines = reply.get("output") or []
+    if pattern:
+        lines = [ln for ln in lines if pattern.search(str(ln))]
+    reply["count"] = len(lines)
+    if limit is not None:
+        lines = lines[:limit]
+    reply["output"] = lines
+    reply["returned"] = len(lines)
+    reply["truncated"] = len(lines) < reply["count"]
+    return reply
 
 
 def autopilot(args, progress=None):
@@ -3271,6 +3292,8 @@ def ai_autopilot(args, progress=None):
     call = {"action": action}
     if action == "engage":
         call["smart"] = smart
+        if _flag(args, "victory_bias", False):
+            call["victory_bias"] = True
     return bridge.call("ai.control", call)
 
 
@@ -3283,7 +3306,39 @@ GRANT_KINDS = {
     "tech": ("givetech", False),      # global: finishes it for everyone
     "objective": ("completeobjective", True),
     "milestone": ("completemilestone", True),
+    "all_techs": ("givealltechs", True),          # faction required, no name
+    "slot3_project": ("completeproject", True),   # faction required, no name
 }
+FACTION_ONLY_KINDS = ("all_techs", "slot3_project")
+
+
+def _faction_id(data_name):
+    reply = bridge.call("query.factions")
+    if isinstance(reply, dict):
+        reply = reply.get("items")
+    for f in reply or []:
+        if _state_value(f["id"], "template") == data_name:
+            return f["id"]
+    raise ToolError("no faction has dataName %r; the console would fall back "
+                    "to the player faction in silence" % data_name)
+
+
+def _slot3_project(faction):
+    """dataName of the project in the faction's research slot 3, or None.
+
+    currentProjectProgress is a list of ProjectProgress {slot, projectTemplateName}
+    in no fixed order; the walk stops at the first index the bridge refuses.
+    """
+    fid = _faction_id(faction)
+    for k in range(8):
+        try:
+            slot = _state_value(fid, "currentProjectProgress[%d].slot" % k)
+        except bridge.VerbError:
+            return None
+        if slot == 3:
+            return _state_value(fid,
+                                "currentProjectProgress[%d].projectTemplateName" % k)
+    return None
 
 
 def grant(args, progress=None):
@@ -3292,20 +3347,44 @@ def grant(args, progress=None):
     if kind not in GRANT_KINDS:
         raise ToolError("kind must be one of: %s"
                         % ", ".join(sorted(GRANT_KINDS)))
+    command, takes_faction = GRANT_KINDS[kind]
     name = args.get("name")
+    faction = args.get("faction")
+    if kind in FACTION_ONLY_KINDS:
+        if name:
+            raise ToolError("kind=%s takes no name, only faction=<dataName>" % kind)
+        if not faction:
+            raise ToolError("kind=%s needs faction=<dataName>" % kind)
+        project = None
+        if kind == "slot3_project":
+            try:
+                project = _slot3_project(faction)
+            except (bridge.VerbError, ToolError) as e:
+                if not args.get("force"):
+                    raise ToolError(
+                        "could not read %s's research slot 3 (%s); refused, "
+                        "because completeproject on an empty slot 3 throws "
+                        "inside the console handler and does nothing. "
+                        "force=true sends it unchecked." % (faction, e))
+            else:
+                if project is None:
+                    raise ToolError("%s has nothing in research slot 3, so "
+                                    "completeproject would throw inside the "
+                                    "console handler and do nothing" % faction)
+        result = _run_console("%s %s" % (command, faction))
+        if project:
+            result["project"] = project
+        return result
     if not name:
         raise ToolError("grant needs name=<dataName>")
-    command, takes_faction = GRANT_KINDS[kind]
 
-    faction = args.get("faction")
     if faction and not takes_faction:
         raise ToolError("%s is global; it takes no faction" % kind)
     # Parameters are case-sensitive dataNames; arguments split on commas only.
     line = "%s %s" % (command, name)
     if faction:
         line += "," + faction
-    out = bridge.call("console", {"line": line})
-    return {"sent": line, "output": out}
+    return _run_console(line)
 
 
 def give_resources(args, progress=None):
@@ -3321,8 +3400,7 @@ def give_resources(args, progress=None):
         line = "givemetonsofresources %s" % amount
     else:
         line = "givemetonsofresources"
-    out = bridge.call("console", {"line": line})
-    return {"sent": line, "output": out}
+    return _run_console(line)
 
 
 # Concrete state class names as `select` reports them: the bridge describes a
@@ -3331,33 +3409,95 @@ def give_resources(args, progress=None):
 # which is the signal to extend the list rather than a silent wrong answer.
 NATION_STATES = ("TINationState",)
 REGION_STATES = ("TIRegionState",)
+ARMY_STATES = ("TIArmyState",)
+FLEET_STATES = ("TISpaceFleetState",)
+COUNCILOR_STATES = ("TICouncilorState",)
 KILLABLE_STATES = ("TIArmyState", "TIAlienArmyState", "TIMegafaunaArmyState",
                    "TICouncilorState", "TISpaceFleetState", "TIHabState",
                    "TILaunchFacilityState", "TIMissionControlFacilityState",
                    "TISpaceDefensesFacilityState")
 
 
-def _run_console(line, select=None, expect=None, needs=None):
+# Every registered console command name, lowercase, in the game's registration
+# order (class bind order, then each constructor's RegisterCommand order); the
+# guard depends on that order, because the parser runs the FIRST registered
+# name it finds anywhere in the line.
+CONSOLE_NAMES = (
+    "help",
+    "dumptime", "addresource", "giveresource", "addcouncilresources",
+    "addspaceresources", "prospect", "revealsites", "alieninfo",
+    "dumpfleetgoal", "propaganda", "aerosols", "addco2",
+    "givemetonsofresources",
+    "musicinfo", "setmusicintensity", "setmusicvolume", "playsoundevent",
+    "givetech", "giveproject", "completeproject", "givealltechs",
+    "dumptechscores",
+    "triggerevent",
+    "completeobjective", "completemilestone", "dumpgoals", "dumpshipyards",
+    "dumpsavings", "dumpmissions", "resetachievement", "resetallachievements",
+    "giveorg", "killstate", "killasset", "forcemissions", "nosecrets",
+    "watchfactions", "designships", "dumpdesigns", "setfaction", "detainme",
+    "addtrait", "removetrait", "sight", "teleport", "givexp", "turnfaction",
+    "modifygdp", "givecp", "giveallcps", "revolution", "regimechange",
+    "startcoup", "secede", "independenceday", "absorb", "unify", "setmiltech",
+    "nuke", "giveips", "setarmyhealth", "armygohome", "transferregion",
+    "spawnlanding", "spawnxenofauna", "peaceout", "declarewar",
+    "changeunrest", "givemeallcps", "randomizeallcps", "setsustainability",
+    "setnuclearweapons", "addsto", "occupy", "setoccupied",
+    "clearrelationscooldowns", "takeallclaims",
+    "setdv", "involuntary", "killship", "killenemyfleet", "damageship",
+    "destroypart", "damagepart", "unlockallshipparts", "destroymodule",
+    "completemodule", "addofficer",
+    "autopilot", "stats", "extendedfleetui", "dev_resetallgogachievements",
+    "exportfactionhd", "exportfactionstrengthhd",
+)
+
+
+def _select(select, expect=None, needs=None):
+    """Set the map selection and type-check what the bridge says it is."""
+    chosen = bridge.call("select", {"id": select}) or {}
+    kind = chosen.get("type")
+    if expect and kind not in expect:
+        raise ToolError("this command acts on %s, but state %s is a %s"
+                        % (needs, select, kind or "state of unknown type"))
+    return chosen
+
+
+def _run_console(line, select=None, expect=None, needs=None, guard=True,
+                 clear_asset=False, select_asset=None):
     """One exact console line, optionally against the map selection.
 
     The console reads two selection slots. `select` sets the map slot
-    (UIOtherSelectedState), which is the one the bridge can reach; the asset
-    slot (UISelectedAssetState) has no setter, so asset-only commands such as
-    killasset are not wrappable and are left to the console tool.
+    (UIOtherSelectedState). Commands that read the asset slot
+    (UISelectedAssetState) first pass `clear_asset`, which empties it through
+    `select {slot: asset}` so a councilor or army picked in the UI cannot take
+    the command instead. Asset-only commands such as killasset are left to
+    the console tool.
 
     The select verb already answers {id, type, name}, so the type check costs
     no extra round trip. It runs before the command: these commands are silent
     on a selection they cannot use, and an empty output frame is otherwise
     indistinguishable from success.
     """
+    if guard:
+        word = line.split(None, 1)[0].lower()
+        low = line.lower()
+        fires = next((n for n in CONSOLE_NAMES if n in low), word)
+        if fires != word:
+            raise ToolError(
+                "refused: the line %r would run %r, not %r: the parser runs "
+                "the first registered command name it finds anywhere in the "
+                "line. The console tool sends a line like this deliberately."
+                % (line, fires, word))
     result = {"sent": line}
+    if clear_asset:
+        bridge.call("select", {"slot": "asset"})
     if select is not None:
-        chosen = bridge.call("select", {"id": select}) or {}
-        result["selected"] = chosen
-        kind = chosen.get("type")
-        if expect and kind not in expect:
-            raise ToolError("this command acts on %s, but state %s is a %s"
-                            % (needs, select, kind or "state of unknown type"))
+        result["selected"] = _select(select, expect, needs)
+    if select_asset is not None:
+        # For the one command that dereferences the asset slot with no null
+        # check; set after the map select so a wrong type is refused first.
+        result["selectedAsset"] = bridge.call(
+            "select", {"slot": "asset", "id": select_asset})
     result["output"] = bridge.call("console", {"line": line})
     return result
 
@@ -3497,6 +3637,340 @@ def prospect(args, progress=None):
     return _run_console("prospect " + body if body else "revealsites")
 
 
+def trigger_event(args, progress=None):
+    """One narrative event for the player faction, forced unless force=false."""
+    name = args.get("name")
+    if not name:
+        raise ToolError("trigger_event needs name=<event dataName>")
+    line = "triggerevent " + name
+    if args.get("force") is False:
+        line += ", nf"
+    return _run_console(line)
+
+
+def give_org(args, progress=None):
+    target = args.get("target")
+    org = args.get("org")
+    if not target or not org:
+        raise ToolError("give_org needs target=<councilor display name or "
+                        "faction dataName> and org=<org dataName>")
+    try:
+        return _run_console("giveorg %s, %s" % (target, org))
+    except bridge.VerbError as e:
+        if "NullReferenceException" not in str(e):
+            raise
+        raise ToolError(
+            "the engine could not place %s's home region in this campaign and "
+            "deleted the org, so nothing was given (%s). The stack is in "
+            "log_tail which=player." % (org, e))
+
+
+def councilor_xp(args, progress=None):
+    councilor = args.get("councilor")
+    amount = args.get("amount")
+    if councilor is None or amount is None:
+        raise ToolError("councilor_xp needs councilor=<state id> and "
+                        "amount=<int>")
+    return _run_console("givexp %d" % amount, select=councilor,
+                        expect=("TICouncilorState",), needs="a councilor",
+                        clear_asset=True)
+
+
+def councilor_trait(args, progress=None):
+    action = args.get("action")
+    if action not in ("add", "remove"):
+        raise ToolError("action must be add or remove")
+    councilor = args.get("councilor")
+    trait = args.get("trait")
+    if councilor is None or not trait:
+        raise ToolError("councilor_trait needs councilor=<state id> and "
+                        "trait=<trait dataName>")
+    return _run_console("%strait %s" % (action, trait), select=councilor,
+                        expect=("TICouncilorState",), needs="a councilor",
+                        clear_asset=True)
+
+
+# Stats with a set-to-value path: four through the DLL verb, three through a
+# console command that takes an absolute value on the selected nation.
+NATION_STAT_VERB = ("cohesion", "democracy", "inequality", "education")
+NATION_STAT_SET = {"miltech": "SetMiltech", "sustainability": "SetSustainability",
+                   "nukes": "SetNuclearWeapons"}
+NATION_STATS = sorted(NATION_STAT_VERB + tuple(NATION_STAT_SET)
+                      + ("unrest", "gdp"))
+
+
+def _state_value(state, path):
+    data = bridge.call("query.state", {"id": state, "path": path})
+    if not isinstance(data, dict) or "value" not in data:
+        raise ToolError("query.state %s on %s answered no value: %r"
+                        % (path, state, data))
+    return data["value"]
+
+
+def nation_stat(args, progress=None):
+    """Set one nation stat to a value. unrest and gdp are delta commands in
+    the console, so the current value is read first and the difference sent."""
+    nation = args.get("nation")
+    stat = args.get("stat")
+    value = args.get("value")
+    if nation is None or not stat or value is None:
+        raise ToolError("nation_stat needs nation=<state id>, stat=<name>, "
+                        "value=<number>")
+    if stat in NATION_STAT_VERB:
+        return bridge.call("nation.set_stat",
+                           {"nation": nation, "stat": stat, "value": value})
+    if stat in NATION_STAT_SET:
+        if stat == "nukes":
+            value = int(value)
+        return _run_console("%s %s" % (NATION_STAT_SET[stat], value),
+                            select=nation, expect=NATION_STATES,
+                            needs="a nation", clear_asset=stat == "miltech")
+    if stat == "unrest":
+        delta = value - _state_value(nation, "unrest")
+        return _run_console("ChangeUnrest %s" % delta, select=nation,
+                            expect=NATION_STATES, needs="a nation")
+    if stat == "gdp":
+        chosen = _select(nation, NATION_STATES, "a nation")
+        name = chosen.get("name") or ""
+        if "," in name:
+            raise ToolError("ModifyGDP takes the nation by name and splits "
+                            "arguments on commas, so %r cannot be addressed; "
+                            "use the console tool with its dataName" % name)
+        delta = (value - _state_value(nation, "GDP")) / 1e9
+        result = _run_console("ModifyGDP %s, %s" % (name, delta))
+        result["selected"] = chosen
+        return result
+    raise ToolError("stat must be one of: " + ", ".join(NATION_STATS))
+
+
+def nuke(args, progress=None):
+    if args.get("region") is None and not args.get("region_name"):
+        raise ToolError("nuke needs region=<region state id> or "
+                        "region_name=<dataName or display name>")
+    if args.get("faction") is None:
+        raise ToolError("nuke needs faction=<faction id or dataName>")
+    return bridge.call("region.nuke", args)
+
+
+def _number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+GIVE_IP_PRIORITIES = (
+    "Economy", "Welfare", "Environment", "Knowledge", "Government", "Unity",
+    "Oppression", "Funding", "Spoils", "Civilian_InitiateSpaceflightProgram",
+    "LaunchFacilities", "MissionControl", "Military_FoundMilitary", "Military",
+    "Military_BuildArmy", "Military_BuildNavy",
+    "Military_InitiateNuclearProgram", "Military_BuildNuclearWeapons",
+    "Military_BuildSpaceDefenses", "Military_BuildSTOSquadron")
+
+NATION_EVENTS = {
+    # action: (command, what the map selection must be, name arguments,
+    #          optional extras)
+    "revolution": ("Revolution", "nation", (), ()),
+    "regime_change": ("RegimeChange", "nation", (), ()),
+    "coup": ("StartCoup", "nation", (), ()),
+    "take_all_claims": ("TakeAllClaims", "nation", (), ()),
+    "add_sto": ("AddSTO", "nation", (), ("count",)),
+    "give_ip": ("GiveIPs", "nation or region", (), ("amount", "priority")),
+    "transfer_region": ("TransferRegion", "region", ("target",), ()),
+    "secede": ("Secede", None, ("target",), ()),
+    "absorb": ("Absorb", None, ("first", "second"), ()),
+    "unify": ("Unify", None, ("first", "second"), ()),
+    "independence_day": ("IndependenceDay", None, (), ()),
+}
+
+
+def nation_event(args, progress=None):
+    """Political upheaval and border changes, by selection or by dataName."""
+    action = args.get("action")
+    if action not in NATION_EVENTS:
+        raise ToolError("action must be one of: %s"
+                        % ", ".join(sorted(NATION_EVENTS)))
+    command, needs, names, extras = NATION_EVENTS[action]
+    nation, region = args.get("nation"), args.get("region")
+    if needs is None and (nation is not None or region is not None):
+        raise ToolError("action=%s takes dataNames, no selection; drop nation "
+                        "and region" % action)
+    if needs == "nation" and (nation is None or region is not None):
+        raise ToolError("action=%s acts on the selected nation; pass "
+                        "nation=<nation state id> and no region" % action)
+    if needs == "region" and (region is None or nation is not None):
+        raise ToolError("action=%s acts on the selected region; pass "
+                        "region=<region state id> and no nation" % action)
+    if needs == "nation or region" and (nation is None) == (region is None):
+        raise ToolError("action=%s acts on one selection; pass nation=<id> OR "
+                        "region=<id>" % action)
+    for key in ("target", "first", "second", "amount", "priority", "count"):
+        if args.get(key) is not None and key not in names + extras:
+            raise ToolError("action=%s takes no %s" % (action, key))
+    for key in names:
+        if not args.get(key):
+            raise ToolError("action=%s needs %s=<nation dataName>" % (action, key))
+        if "," in args[key]:
+            raise ToolError("%s=%r holds a comma, which the console splits "
+                            "on; pass the dataName" % (key, args[key]))
+
+    line = command
+    if names:
+        line += " " + ",".join(args[k] for k in names)
+    if action == "add_sto":
+        count = args.get("count")
+        if count is not None and not _number(count):
+            raise ToolError("action=add_sto needs count=<integer>")
+        line += " %d" % (1 if count is None else count)   # bare AddSTO is 0
+    if action == "give_ip":
+        if not _number(args.get("amount")):
+            raise ToolError("action=give_ip needs amount=<number>")
+        priority = args.get("priority")
+        if priority is not None and priority not in GIVE_IP_PRIORITIES:
+            raise ToolError("priority must be one of: %s (a misspelling would "
+                            "silently become Economy)"
+                            % ", ".join(GIVE_IP_PRIORITIES))
+        line += " " + ("%s,%s" % (priority, args["amount"]) if priority
+                       else str(args["amount"]))
+    if needs is None:
+        return _run_console(line)
+    state = nation if nation is not None else region
+    return _run_console(line, select=state,
+                        expect=NATION_STATES if nation is not None else REGION_STATES,
+                        needs="a nation" if nation is not None else "a region",
+                        clear_asset=action == "revolution")
+
+
+def army_edit(args, progress=None):
+    action = args.get("action")
+    if action not in ("set_health", "go_home"):
+        raise ToolError("action must be set_health or go_home")
+    army = args.get("army")
+    if army is None:
+        raise ToolError("army_edit needs army=<army state id>")
+    value = args.get("value")
+    if action == "set_health":
+        if not _number(value) or not 0 <= value <= 1:
+            raise ToolError("action=set_health needs value in 0..1 (the "
+                            "console reads anything unparsable as 1.0)")
+        line = "SetArmyHealth %s" % value
+    else:
+        if value is not None:
+            raise ToolError("action=go_home takes no value")
+        line = "ArmyGoHome"
+    return _run_console(line, select=army, expect=ARMY_STATES, needs="an army",
+                        clear_asset=True)
+
+
+def fleet_edit(args, progress=None):
+    action = args.get("action")
+    if action not in ("set_dv", "damage_ship", "add_officer"):
+        raise ToolError("action must be set_dv, damage_ship, or add_officer")
+    if action == "add_officer":
+        ship, officer = args.get("ship"), args.get("officer")
+        if not ship or not officer:
+            raise ToolError("action=add_officer needs ship=<ship display name> "
+                            "and officer=<officer dataName>")
+        if "," in ship:
+            raise ToolError("AddOfficer splits arguments on commas, so ship "
+                            "%r cannot be addressed; rename the ship first" % ship)
+        if args.get("fleet") is not None or args.get("value") is not None:
+            raise ToolError("action=add_officer takes no fleet or value")
+        return _run_console("AddOfficer %s, %s" % (ship, officer))
+    fleet, value = args.get("fleet"), args.get("value")
+    if fleet is None or not _number(value):
+        raise ToolError("action=%s needs fleet=<fleet state id> and "
+                        "value=<number>" % action)
+    if action == "set_dv" and not 0 <= value <= 1:
+        raise ToolError("action=set_dv needs value in 0..1, a fraction of max "
+                        "delta-v (the console reads values above 1 as percent "
+                        "and anything unparsable as 0, which drains the fleet)")
+    command = "SetDV" if action == "set_dv" else "DamageShip"
+    return _run_console("%s %s" % (command, value), select=fleet,
+                        expect=FLEET_STATES, needs="a fleet", clear_asset=True)
+
+
+DESTINATION_STATES = REGION_STATES + FLEET_STATES + ("TIHabState",)
+
+
+def councilor_move(args, progress=None):
+    """teleport takes the councilor by NAME and the destination by selection."""
+    councilor, destination = args.get("councilor"), args.get("destination")
+    if councilor is None or destination is None:
+        raise ToolError("councilor_move needs councilor=<councilor state id> "
+                        "and destination=<region, fleet, or hab state id>")
+    _select(councilor, COUNCILOR_STATES, "a councilor")
+    # The select reply's name is the active player's intel VIEW of the
+    # councilor, obscured at low intel; teleport compares the raw field.
+    name = _state_value(councilor, "displayName")
+    if not name or "," in name:
+        raise ToolError("teleport takes the councilor by display name and "
+                        "splits arguments on commas, so %r cannot be "
+                        "addressed" % name)
+    return _run_console("teleport " + name, select=destination,
+                        expect=DESTINATION_STATES,
+                        needs="a region, fleet, or hab", clear_asset=True)
+
+
+def councilor_detain(args, progress=None):
+    councilor = args.get("councilor")
+    if councilor is None:
+        raise ToolError("councilor_detain needs councilor=<councilor state id>")
+    line = "detainme" + (" " + args["by_faction"] if args.get("by_faction") else "")
+    return _run_console(line, select=councilor, expect=COUNCILOR_STATES,
+                        needs="a councilor", select_asset=councilor)
+
+
+def turn_faction(args, progress=None):
+    faction = args.get("faction")
+    if not faction:
+        raise ToolError("turn_faction needs faction=<faction dataName>")
+    return _run_console("turnfaction " + faction)
+
+
+def force_missions(args, progress=None):
+    result = _run_console("forcemissions")
+    result["note"] = ("toggle with no readable state: count your own calls, "
+                      "and assume it resets on scene reload")
+    return result
+
+
+def set_player_faction(args, progress=None):
+    faction = args.get("faction")
+    if not faction:
+        raise ToolError("set_player_faction needs faction=<faction dataName>")
+    if faction == "AlienCouncil":
+        raise ToolError("refused: playing as AlienCouncil crashes some actions")
+    return _run_console("setfaction " + faction)
+
+
+def atmosphere(args, progress=None):
+    action, ppm = args.get("action"), args.get("ppm")
+    if action not in ("aerosols", "co2"):
+        raise ToolError("action must be aerosols or co2")
+    if not _number(ppm):
+        raise ToolError("atmosphere needs ppm=<number>; negative removes")
+    return _run_console("%s %s" % ("aerosols" if action == "aerosols" else "addco2",
+                                   ppm))
+
+
+def propaganda(args, progress=None):
+    faction = args.get("faction")
+    if not faction:
+        raise ToolError("propaganda needs faction=<faction dataName>")
+    parts = [faction]
+    if args.get("strength") is not None or args.get("nation"):
+        strength = args.get("strength")
+        parts.append(str(1 if strength is None else strength))
+    if args.get("nation"):
+        if "," in args["nation"]:
+            raise ToolError("nation=%r holds a comma, which the console splits "
+                            "on; pass the dataName" % args["nation"])
+        parts.append(args["nation"])
+    return _run_console("propaganda " + ", ".join(parts))
+
+
+def unlock_all_ship_parts(args, progress=None):
+    return _run_console("UnlockAllShipParts")
+
+
 # Faction hate: one verb, two tools, so the read is not a state-changing call
 # as far as the pause gate is concerned and a paused campaign can be read.
 
@@ -3566,7 +4040,25 @@ def campaign_new(args, progress=None):
     # alone: whatever the run was playing before is not what a crash here
     # should reload.
     _entered_campaign()
-    return bridge.call("campaign.new", args)
+    # The verb refuses, before it changes anything, while the start scene is
+    # still loading after a menu return; that one refusal is waited out.
+    for attempt in range(HANDOFF_TRIES):
+        try:
+            reply = bridge.call("campaign.new", args)
+        except VerbError as e:
+            if (attempt + 1 == HANDOFF_TRIES
+                    or not any(r in str(e) for r in HANDOFF_REFUSALS)):
+                raise
+            _time.sleep(HANDOFF_SLEEP)
+            continue
+        if attempt and isinstance(reply, dict):
+            reply["handoffRetries"] = attempt
+        return reply
+
+
+HANDOFF_REFUSALS = ("no start menu controller", "start menu is not initialized")
+HANDOFF_TRIES = 5
+HANDOFF_SLEEP = 2
 
 
 # Seconds to wait for the campaign to finish unloading after main_menu. The

@@ -12,6 +12,7 @@ Transport: newline-delimited JSON-RPC 2.0 on stdin/stdout. Each tool call
 opens a TCP connection to the bridge (127.0.0.1:17470) inside the running
 game; a dead bridge yields a tool error naming the next step, never a crash.
 """
+import datetime
 import json
 import os
 import sys
@@ -27,7 +28,7 @@ import tools        # noqa: E402
 # see and report, instead of an invisible one that only a reconnect applies.
 codestate.note()
 
-SERVER_INFO = {"name": "terra-invicta", "version": "0.1.2"}
+SERVER_INFO = {"name": "terra-invicta", "version": "0.2.0"}
 PROTOCOL_VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05")
 
 INSTRUCTIONS = """\
@@ -256,4 +257,16 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         sys.stderr.write(USAGE)
         sys.exit(0 if sys.argv[1] in ("-h", "--help") else 2)
+    # Appended, never truncated on start: a selfcheck or a second client
+    # spawns another server beside a live one. Trimmed once it passes 2 MB.
+    try:
+        if (os.path.exists(tools.CALL_LOG)
+                and os.path.getsize(tools.CALL_LOG) > 2 * 1024 * 1024):
+            open(tools.CALL_LOG, "w").close()
+        with open(tools.CALL_LOG, "a") as f:
+            f.write("=== server start %s pid=%d\n" % (
+                datetime.datetime.now().isoformat(timespec="milliseconds"),
+                os.getpid()))
+    except OSError:
+        pass
     main()

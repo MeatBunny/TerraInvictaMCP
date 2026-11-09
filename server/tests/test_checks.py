@@ -50,6 +50,34 @@ NEW_ORG = {"dataName": "Org_New", "friendlyName": "New Group",
            "orgType": "Academic", "tier": 1}
 
 
+class LocalizeBridge(_fixtures.OfflineBridge):
+    """A DLL that serves query.localize: `found` keys resolve cleanly,
+    `fell_back` keys resolve through a fallback (default: every other key),
+    and the rest resolve nowhere."""
+
+    def __init__(self, found=(), fell_back=None):
+        super().__init__()
+        self.found, self.fell_back = set(found), fell_back
+
+    def row(self, key):
+        hit = key in self.found
+        fell = not hit and (self.fell_back is None or key in self.fell_back)
+        return {"key": key, "found": hit or fell, "fellBack": fell}
+
+    def send(self, req, timeout=None, port=None):
+        self.calls.append(req)
+        cmd, args = req["cmd"], req["args"]
+        if cmd == "version":
+            data = {"game": "unknown"}
+        elif cmd == "verbs":
+            data = {"verbs": [{"name": "query.localize"}]}
+        elif cmd == "query.localize":
+            data = {"results": [self.row(k) for k in args["keys"]]}
+        else:
+            return {"id": req["id"], "ok": False, "error": "unsupported"}
+        return {"id": req["id"], "ok": True, "data": data}
+
+
 class CleanBaselineTest(_fixtures.ModcheckTestCase):
     """E0 and E1. If the clean run is not clean, no other case's delta means
     anything, so every field of it is pinned."""
@@ -504,6 +532,174 @@ class LocaleTest(_fixtures.ModcheckTestCase):
         self.assertEqual(locale["summary"]["mods"], ["Deep"])
         self.assertEqual(locale["verdicts"], [])
         self.assertEqual(lints(locale), ["enOnly"])
+
+    OBJ_CAMPAIGN = {"dataName": "Objective_New", "objectiveType": "Campaign",
+                    "factionDataNames": ["ResistCouncil", "EscapeCouncil"]}
+    OBJ_GENERAL = {"dataName": "Objective_New", "objectiveType": "General"}
+    OBJ_KEY = "TIObjectiveTemplate.displayName.Objective_New"
+
+    def online_locale(self, bridge, scenario=None):
+        self.bridge = bridge
+        result = modcheck.check_locale(modcheck._Session(bridge), None,
+                                       scenario, True)
+        self.assertEqual(result["summary"]["engine"], "in-engine")
+        return result
+
+    def localize_calls(self):
+        return [c["args"]["keys"] for c in self.bridge.calls
+                if c["cmd"] == "query.localize"]
+
+    def test_an_objective_missing_one_faction_key_names_it(self):
+        # The engine reads a non-General objective per faction, so the
+        # requirement is one key per faction in factionDataNames; only the
+        # absent one is reported.
+        self.add_mod("Obj", files={"TIObjectiveTemplate.json":
+                                   [self.OBJ_CAMPAIGN]},
+                     loc={"TIObjectiveTemplate.en":
+                          self.OBJ_KEY + ".ResistCouncil=New\n"})
+        result = self.run_modcheck()
+        self.assert_offline(result)
+        locale = check(result, "locale")
+        self.assertEqual(kinds(locale["verdicts"]), ["missingKey"])
+        self.assertEqual(locale["verdicts"][0]["key"],
+                         self.OBJ_KEY + ".EscapeCouncil")
+
+    def test_a_general_objective_with_a_bare_key_is_covered(self):
+        self.add_mod("Obj", files={"TIObjectiveTemplate.json":
+                                   [self.OBJ_GENERAL]},
+                     loc={"TIObjectiveTemplate.en": self.OBJ_KEY + "=New\n"})
+        result = self.run_modcheck()
+        self.assert_offline(result)
+        locale = check(result, "locale")
+        self.assertEqual(locale["summary"]["mods"], ["Obj"])
+        self.assertEqual(locale["verdicts"], [])
+
+    def test_a_campaign_objective_under_the_bare_key_only_is_missing(self):
+        # The engine never reads the bare key for a Campaign objective, so
+        # every faction sees the raw key: this is the bug the check exists
+        # to catch, offline and online.
+        self.add_mod("Obj", files={"TIObjectiveTemplate.json":
+                                   [self.OBJ_CAMPAIGN]},
+                     loc={"TIObjectiveTemplate.en": self.OBJ_KEY + "=New\n"
+                          "TIObjectiveTemplate.description.Objective_New="
+                          "Desc\n"})
+        offline = check(self.run_modcheck(check="locale"), "locale")
+        faction_keys = [self.OBJ_KEY + ".ResistCouncil",
+                        self.OBJ_KEY + ".EscapeCouncil"]
+        self.assertEqual(kinds(offline["verdicts"]), ["missingKey"] * 2)
+        self.assertEqual([v["key"] for v in offline["verdicts"]],
+                         faction_keys)
+        online = self.online_locale(LocalizeBridge(
+            found=[self.OBJ_KEY, "TIObjectiveTemplate.description."
+                                 "Objective_New"], fell_back=()))
+        self.assertEqual(kinds(online["verdicts"]), ["missingKey"] * 2)
+        self.assertEqual([v["key"] for v in online["verdicts"]],
+                         faction_keys)
+        self.assertEqual(kinds(online["warnings"]), ["missingKey"] * 2)
+
+    def test_a_partly_localized_class_requires_no_key(self):
+        # Vanilla ships a displayName for one of its two mining profiles, so
+        # a new profile with no key is the vanilla norm, not a finding.
+        self.add_mod("Mine", files={"TIMiningProfileTemplate.json": [
+            {"dataName": "Mine_New", "friendlyName": "New",
+             "modifyBySize": True}]})
+        result = self.run_modcheck()
+        self.assert_offline(result)
+        locale = check(result, "locale")
+        self.assertEqual(locale["summary"]["mods"], ["Mine"])
+        self.assertEqual(locale["verdicts"], [])
+
+    def test_a_partly_localized_class_is_still_checked_online(self):
+        # The vanilla-coverage exemption covers keys found nowhere only; a
+        # key the engine had to fall back on is a MISMATCH in any class.
+        self.add_mod("Mine", files={"TIMiningProfileTemplate.json": [
+            {"dataName": "Mine_New", "friendlyName": "New",
+             "modifyBySize": True}]})
+        offline = check(self.run_modcheck(check="locale"), "locale")
+        self.assertEqual(offline["summary"]["engine"], "disk-approximation")
+        self.assertEqual(offline["verdicts"], [])
+        self.bridge = LocalizeBridge()
+        online = modcheck.check_locale(modcheck._Session(self.bridge),
+                                       None, None, True)
+        self.assertEqual(online["summary"]["engine"], "in-engine")
+        self.assertEqual(kinds(online["verdicts"]), ["fellBack"])
+        self.assertEqual(online["verdicts"][0]["key"],
+                         "TIMiningProfileTemplate.displayName.Mine_New")
+
+    def test_online_an_objective_asks_for_its_faction_keys(self):
+        self.add_mod("Obj", files={"TIObjectiveTemplate.json":
+                                   [self.OBJ_CAMPAIGN]})
+        self.online_locale(LocalizeBridge())
+        [keys] = self.localize_calls()
+        self.assertEqual(sorted(keys), sorted(
+            "TIObjectiveTemplate.%s.Objective_New.%s" % (field, faction)
+            for field in ("displayName", "description")
+            for faction in ("ResistCouncil", "EscapeCouncil")))
+
+    def test_online_a_localized_campaign_objective_is_clean(self):
+        self.add_mod("Obj", files={"TIObjectiveTemplate.json":
+                                   [self.OBJ_CAMPAIGN]})
+        online = self.online_locale(LocalizeBridge(found=[
+            "TIObjectiveTemplate.%s.Objective_New.%s" % (field, faction)
+            for field in ("displayName", "description")
+            for faction in ("ResistCouncil", "EscapeCouncil")], fell_back=()))
+        self.assertEqual(online["verdicts"], [])
+        self.assertEqual(online["warnings"], [])
+        self.assertEqual(online["summary"]["keysChecked"], 4)
+
+    def test_online_a_general_objective_reads_the_bare_key(self):
+        self.add_mod("Obj", files={"TIObjectiveTemplate.json":
+                                   [self.OBJ_GENERAL]})
+        online = self.online_locale(LocalizeBridge(found=[self.OBJ_KEY],
+                                                   fell_back=()))
+        [keys] = self.localize_calls()
+        self.assertEqual(sorted(keys), [
+            "TIObjectiveTemplate.description.Objective_New", self.OBJ_KEY])
+        self.assertEqual(online["verdicts"], [])
+
+    def test_online_one_absent_faction_key_is_one_finding(self):
+        self.add_mod("Obj", files={"TIObjectiveTemplate.json":
+                                   [self.OBJ_CAMPAIGN]})
+        online = self.online_locale(LocalizeBridge(
+            found=[self.OBJ_KEY + ".ResistCouncil"]))
+        self.assertEqual(kinds(online["verdicts"]), ["fellBack"])
+        self.assertEqual(online["verdicts"][0]["key"],
+                         self.OBJ_KEY + ".EscapeCouncil")
+
+    def test_online_a_description_found_nowhere_warns(self):
+        self.add_mod("Org", files={"TIOrgTemplate.json": [NEW_ORG]})
+        online = self.online_locale(LocalizeBridge(
+            found=["TIOrgTemplate.displayName.Org_New"], fell_back=()))
+        self.assertEqual(online["verdicts"], [])
+        self.assertEqual(kinds(online["warnings"]), ["missingKey"])
+        self.assertEqual(online["warnings"][0]["key"],
+                         "TIOrgTemplate.description.Org_New")
+
+    def test_online_a_key_found_nowhere_on_an_exempt_class_is_nothing(self):
+        # Vanilla ships no key for half its mining profiles, so a new one
+        # with none is the vanilla norm online as well as offline.
+        self.add_mod("Mine", files={"TIMiningProfileTemplate.json": [
+            {"dataName": "Mine_New", "friendlyName": "New",
+             "modifyBySize": True}]})
+        online = self.online_locale(LocalizeBridge(fell_back=()))
+        self.assertEqual(online["verdicts"], [])
+        self.assertEqual(online["warnings"], [])
+        self.assertEqual(online["summary"]["keysChecked"], 2)
+
+    def test_online_no_call_carries_more_than_200_keys(self):
+        # One objective with 150 factions is 300 keys across two fields: it
+        # has to split across calls, since the DLL refuses more than 200.
+        factions = ["F%03d" % i for i in range(150)]
+        self.add_mod("Wide", files={"TIObjectiveTemplate.json": [
+            {"dataName": "Objective_Wide", "objectiveType": "Campaign",
+             "factionDataNames": factions}]})
+        online = self.online_locale(LocalizeBridge(found=[
+            "TIObjectiveTemplate.%s.Objective_Wide.%s" % (field, faction)
+            for field in ("displayName", "description")
+            for faction in factions], fell_back=()))
+        self.assertEqual(list(map(len, self.localize_calls())), [200, 100])
+        self.assertEqual(online["verdicts"], [])
+        self.assertEqual(online["summary"]["keysChecked"], 300)
 
     def test_vanilla_key_shapes_are_not_phantoms(self):
         # Objectives carry a faction suffix after the dataName and narrative

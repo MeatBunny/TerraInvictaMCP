@@ -6,13 +6,80 @@ using PavonisInteractive.TerraInvicta;
 
 namespace TerraInvictaMCP
 {
-    // nation.set_stat, kill.module.
+    // nation.set_stat, region.nuke, kill.module.
     //
     // Both force state the way the spawn verbs do: they take the engine's own
     // mutator and leave out the play-legality around it. A fixture proves a
     // mechanism fires, never that the state is reachable through play.
     public static partial class Verbs
     {
+        #region region.nuke
+
+        // A nuclear strike arriving on a region, with the faction responsible named by
+        // the caller. The console's Nuke always attributes to the active player; the
+        // attribution is what the mood machinery, the atrocity bookkeeping and the
+        // retaliation read, so a test that is about who nuked whom cannot use it.
+        //
+        // OnNuclearAttackArrives is the arrival half only: no launch, no travel time,
+        // no nuclear stockpile spent. It fires the Mood event and the NuclearStrike
+        // game event, then ApplyDamageToRegion at full strength with nuclear set.
+        static JToken RegionNuke(JObject args)
+        {
+            TIRegionState region = ArgState<TIRegionState>(args, "region", "region_name");
+            TIFactionState faction = ArgState<TIFactionState>(args, "faction", "faction");
+            JToken asked = args != null ? args["nation"] : null;
+            TINationState nation = asked != null && asked.Type != JTokenType.Null
+                ? ArgNation(args, "nation") : null;
+
+            // ApplyDamageToRegion calls region.nation.ModifyGDP with no null check, and
+            // it does so after both events have already fired, so a region with no
+            // nation is refused here rather than left half applied.
+            TINationState victim = Safe<TINationState>(
+                delegate { return region.nation; }, null);
+            if (victim == null)
+                throw new VerbError("region " + StateName(region)
+                    + " has no nation; a nuclear strike is applied through it");
+
+            // The engine's own branch, computed before the call so the reply can say
+            // which one ran: severe damage needs the launching nation to be at war with
+            // the region's, and an absent nation counts as severe.
+            bool severe = nation == null
+                || Safe<bool>(delegate { return nation.enemies.Contains(victim); }, false);
+
+            region.OnNuclearAttackArrives(faction, nation);
+            // The arrival does not count itself. Every real path runs this increment in
+            // the caller (NuclearAttackOnRegion), and without it the region neither
+            // reads nor draws as nuked.
+            region.ChangeNuclearDetonations(1);
+
+            var o = new JObject();
+            o["region"] = Describe(region);
+            o["faction"] = Describe(faction);
+            o["nation"] = nation != null ? Describe(nation) : (JToken)JValue.CreateNull();
+            o["severe"] = severe;
+            // The region's own fields ApplyDamageToRegion writes on a nuclear hit,
+            // read back off the state. Population is the damage; the three flags are
+            // the permanent part, cleared for good when the region was one of them and
+            // left alone entirely outside the severe branch. Everything else the call
+            // moves (GDP, sustainability, investment, armies, councilors, space
+            // facilities) lands on the nation or on other states and is read back with
+            // the verb that owns it.
+            var after = new JObject();
+            Put(after, "populationInMillions",
+                delegate { return Num(region.populationInMillions); });
+            Put(after, "coreEconomicRegion",
+                delegate { return (JToken)region.coreEconomicRegion; });
+            Put(after, "resourceRegion",
+                delegate { return (JToken)region.resourceRegion; });
+            Put(after, "oilRegion", delegate { return (JToken)region.oilRegion; });
+            Put(after, "nuclearDetonations",
+                delegate { return (JToken)region.nuclearDetonations; });
+            o["after"] = after;
+            return o;
+        }
+
+        #endregion
+
         #region nation.set_stat
 
         // One core nation stat. `add` takes a DELTA, because every engine setter

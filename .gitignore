@@ -5,6 +5,7 @@ Settings.xml
 __pycache__/
 server/modcheck_baseline.dat
 server/modcheck_enums.dat
+server/calls.log
 release/
 .env
 *.swp

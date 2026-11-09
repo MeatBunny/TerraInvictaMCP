@@ -7,8 +7,11 @@ handler whose payload is worth returning even though the call failed sets
 "_failed": True in the dict; dispatch strips the key and marks the result an
 error, so the caller gets the report and the failure both.
 """
+import datetime
 import json
+import os
 import re
+import time
 
 import bridge
 import codestate
@@ -17,6 +20,9 @@ import modcheck
 from compose import ToolError
 
 TEXT_LIMIT = 160000     # JSON above this is replaced by an explicit tool error
+HEAD_CHARS = 1500       # how much of an oversized payload the error carries
+# One line per tool call this process made; truncated when the server starts.
+CALL_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calls.log")
 
 GAME_DOWN = ("game is not running or the bridge is down (%s) -- call "
              "game_start, then observe. A freshly launched game takes 20-60s "
@@ -52,7 +58,7 @@ BRIDGE_VERBS_USED = {
     "spawn.fleet", "combat.start", "combat.status", "combat.autoresolve",
     "combat.precombat", "combat.stance", "query.autopilot",
     "spawn.hab", "spawn.module", "spawn.army", "spawn.councilor",
-    "spawn.alien_site",
+    "spawn.alien_site", "region.nuke",
     "design.create", "design.delete", "design.auto",
     "kill.module", "faction.relations",
     "module.power", "hab.build_module",
@@ -78,6 +84,7 @@ BRIDGE_VERBS_RAW_ONLY = {
     "ui.tooltip", "ui.describe", "ui.options",
     "mission.evaluate",
     "action.list", "action.invoke",
+    "test.autoresolve_fault",
 }
 
 
@@ -94,10 +101,13 @@ def json_result(data):
             "error": "response_too_large",
             "message": (
                 "Serialized tool response exceeds the text limit; the payload "
-                "was omitted. The operation may already have completed. Do not "
+                "was omitted and `head` holds its first %d serialized "
+                "characters. The operation may already have completed. Do not "
                 "retry a state-changing command blindly; inspect current state "
                 "first. Request less output using limit/fields/contains where "
-                "supported, or make the producer return a smaller result."),
+                "supported, or make the producer return a smaller result."
+                % HEAD_CHARS),
+            "head": text[:HEAD_CHARS],
             "textLength": len(text),
             "textLimit": TEXT_LIMIT,
         }, indent=2), True)
@@ -331,8 +341,10 @@ TOOLS = [
       "max_seconds": i("wall-clock budget per call, default 90")}),
     ("query", compose.query, True, False,
      "List game state. faction narrows habs/fleets/designs/councilors; "
-     "contains/limit narrow nations. kind=scenarios enumerates the campaign "
-     "picker (category, list order, requiredDLC) -- needed before "
+     "contains narrows nations; limit caps every kind except scenarios, "
+     "and the reply carries count/returned/truncated. kind=scenarios "
+     "enumerates the campaign picker (category, list order, requiredDLC) "
+     "-- needed before "
      "campaign_new or smoke_test.",
      {"kind": s("factions, habs, fleets, designs, scenarios, councilors, or "
                 "nations", req=True),
@@ -353,7 +365,11 @@ TOOLS = [
      {"id": i("game state id (ids come from query); XOR root"),
       "root": s("static entry point 'TypeName.Member[.Member]'; XOR id"),
       "path": s("dot-path walked from the start object"),
-      "include_private": b("include non-public members (default false)")}),
+      "include_private": b("include non-public members (default false)"),
+      "fields": arr("only these member names; unknown ones come back "
+                    "under missingFields", items={"type": "string"}),
+      "limit": i("max members dumped; the reply carries "
+                 "count/returned/truncated")}),
     ("template", "query.template", True, False,
      "Merged post-mod template data -- ground truth for what the engine "
      "holds, unlike files on disk. Without dataName: the class's data names "
@@ -388,7 +404,10 @@ TOOLS = [
      "a target.",
      {"line": s("console command line, e.g. 'triggerevent event_DryHole'",
                 req=True),
-      "select": i("state id to select before running")}),
+      "select": i("state id to select before running"),
+      "contains": s("regex; keep only matching output lines"),
+      "limit": i("max output lines returned; count/returned/truncated "
+                 "report the cut")}),
     ("autopilot", compose.autopilot, False, True,
      "Play the player faction with the game's UI macro, or stop. NOT the "
      "faction AI, and it picks a RANDOM tech on a tech prompt, so never use "
@@ -425,18 +444,36 @@ TOOLS = [
      "again), and it releases itself if the campaign changes. Scope of "
      "brutal, side effects and the clock counters: ti://docs/playbook.",
      {"action": s("engage, release, or status", req=True),
-      "smart": s("brutal (default) or campaign")}),
+      "smart": s("brutal (default) or campaign"),
+      "victory_bias": b("EXPERIMENTAL: also weight the planner toward the "
+                        "faction's victory objectives (research focus, "
+                        "objective tech value, nation and hab-site scoring); "
+                        "in a ten-year A/B run the patches fired but the "
+                        "faction ended further from its conditions than the "
+                        "plain AI; refused by the DLL when a game update "
+                        "broke those surfaces (default false)")}),
     ("grant", compose.grant, False, True,
      "Force one thing complete: kind=project|tech|objective|milestone, "
      "name=<dataName>, optional faction=<dataName> (defaults to the player; "
      "tech is global and takes none). dataNames are case-sensitive; "
-     "project names retry with a 'Project_' prefix, so either form works. To "
-     "grant EVERYTHING use console line='givealltechs <faction>', but beware: "
-     "it also completes every project whose faction prereqs are met, which "
-     "will silently pre-satisfy whatever you meant to test.",
-     {"kind": s("project, tech, objective, or milestone", req=True),
-      "name": s("dataName, case-sensitive", req=True),
-      "faction": s("faction dataName; omit for the player faction")}),
+     "project names retry with a 'Project_' prefix, so either form works. "
+     "Two kinds take faction and no name: kind=all_techs grants every "
+     "NON-endgame tech globally AND completes every project whose prereqs "
+     "that faction meets, which silently pre-satisfies whatever you meant to "
+     "test, so use it last; kind=slot3_project completes whatever is in that "
+     "faction's research slot 3, after reading the slot: on an EMPTY slot 3 "
+     "the console handler throws before changing anything and the call comes "
+     "back as a bridge error, so an empty or unreadable slot is refused here "
+     "with the reason, and force=true sends it unchecked. "
+     + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {"kind": s("project, tech, objective, milestone, all_techs, or "
+                "slot3_project", req=True),
+      "name": s("dataName, case-sensitive (not for all_techs or "
+                "slot3_project)"),
+      "faction": s("faction dataName; omit for the player faction (required "
+                   "for all_techs and slot3_project)"),
+      "force": b("slot3_project only: send even when slot 3 cannot be read "
+                 "(default false)")}),
     ("give_resources", compose.give_resources, False, True,
      "Resources for the player faction. Bare call gives absurd amounts of "
      "all 14, which is what you want for most tests. resource=<name> with "
@@ -583,6 +620,194 @@ TOOLS = [
      + CONSOLE_SILENT + " Needs a loaded campaign.",
      {"body": s("space body display name or template name; omit to reveal "
                 "every body")}),
+    ("trigger_event", compose.trigger_event, False, True,
+     "Fire one narrative event for your faction by dataName. Forced by "
+     "default: the event's own conditions are ignored; force=false respects "
+     "them, so an event whose conditions fail then does nothing. A bare name "
+     "works (the game retries with the event_ prefix). "
+     + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {"name": s("event dataName, with or without the event_ prefix, "
+                "case-sensitive", req=True),
+      "force": b("ignore the event's conditions (default true)")}),
+    ("give_org", compose.give_org, False, True,
+     "Give an org to a councilor, by the councilor's exact display name, or "
+     "to a faction by dataName (it goes to that faction's first councilor, "
+     "else its pool). TRAPS: an org another faction owns is STOLEN from it; "
+     "a cheated org is removed from every faction's org market; the name "
+     "match is live orgs first, then templates, so the state you see may not "
+     "be a fresh instance; some nation-bound orgs (CentralIntelligenceAgency, "
+     "AmericanMafia) cannot be placed in every campaign, and the engine then "
+     "deletes the org and gives nothing, which comes back as a refusal "
+     "saying so. " + CONSOLE_SILENT
+     + " Needs a loaded campaign.",
+     {"target": s("councilor display name (\"John Thomas\") or faction "
+                  "dataName, case-sensitive", req=True),
+      "org": s("org dataName, case-sensitive", req=True)}),
+    ("councilor_xp", compose.councilor_xp, False, True,
+     "Give XP to one councilor by state id. The state is selected first and "
+     "refused if it is not a councilor. " + CONSOLE_SILENT
+     + " Needs a loaded campaign.",
+     {"councilor": i("councilor state id", req=True),
+      "amount": i("XP to add", req=True)}),
+    ("councilor_trait", compose.councilor_trait, False, True,
+     "Add or remove one trait on a councilor by state id. action=add on a "
+     "trait the councilor already has does nothing and logs a warning; the "
+     "console shows nothing either way. action=remove prints "
+     "'Trait not found on councilor' when it is absent. "
+     + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {"action": s("add or remove", req=True),
+      "councilor": i("councilor state id", req=True),
+      "trait": s("trait dataName, case-sensitive", req=True)}),
+    ("nation_stat", compose.nation_stat, False, True,
+     "Set one nation stat to an absolute value by nation state id. Stats: "
+     "cohesion, democracy, inequality, education (through the engine's own "
+     "mutator, with its ranges; education is not undoable, see inspect), "
+     "miltech (the nation's cap is raised if exceeded), sustainability, "
+     "nukes (integer count), unrest and gdp. unrest and gdp are delta "
+     "commands in the console, so the current value is read first and the "
+     "difference sent; gdp is in DOLLARS, the unit inspect path=GDP reads. "
+     "The selected type is checked, and a nation whose display name contains "
+     "a comma is refused for gdp. The "
+     "four core stats return the nation.set_stat reply (before, delta, "
+     "after, stats); the five console stats return {sent, selected, output}. "
+     + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {"nation": i("nation state id", req=True),
+      "stat": s("cohesion, democracy, inequality, education, miltech, "
+                "sustainability, nukes, unrest, or gdp", req=True),
+      "value": n("target value (gdp in dollars, nukes an integer)",
+                 req=True)}),
+    ("nuke", compose.nuke, False, True,
+     "Apply one strategic nuclear strike to a region through the engine's own "
+     "arrival path, attributed to the named faction and, if given, nation. "
+     "The console's Nuke always attributes to the active player. The region "
+     "is a state id, or region_name as its dataName or display name. Passing "
+     "nation puts the engine on the LIGHTER damage branch unless that nation "
+     "lists the region's nation among its enemies (population loss a tenth, "
+     "GDP a fraction, the region's economic flags untouched), and the reply's "
+     "severe says which branch ran; omit nation for the full unattributed "
+     "strike. Returns "
+     "{region, faction, nation, after}. Needs a loaded campaign.",
+     {"region": i("region state id; or pass region_name"),
+      "region_name": s("region dataName or display name, used when region is "
+                       "omitted"),
+      "faction": {"type": ["integer", "string"], "_req": True,
+                  "description": "attacking faction id or dataName"},
+      "nation": {"type": ["integer", "string"], "_req": False,
+                 "description": "launching nation id or dataName; omit for "
+                                "an unattributed launch"}}),
+    ("nation_event", compose.nation_event, False, True,
+     "Political upheaval and border changes. By nation state id: "
+     "action=revolution, regime_change (the beneficiary is your first army's "
+     "home nation, else a random army's), coup (no instigating councilor), "
+     "take_all_claims (every claimed region moves into the nation), add_sto "
+     "(count exofighter squadrons, default 1). action=give_ip invests IP "
+     "into nation=<id> OR region=<id>: amount alone gives that much to EVERY "
+     "priority, priority names one and is checked against the game's list, "
+     "since the console reads a misspelling as Economy. action=transfer_region "
+     "(region=<id>, target=<nation dataName>). By dataName only, no "
+     "selection: secede (target=<non-extant nation>, brought into being from "
+     "its capital claim), absorb (first annexes second), unify (first and "
+     "second unify under the real policy; ORDER MATTERS, unifying into a "
+     "non-extant shell loses the nation), independence_day (every non-extant "
+     "human nation secedes at once, credited to you). "
+     + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {"action": s("revolution, regime_change, coup, take_all_claims, "
+                  "add_sto, give_ip, transfer_region, secede, absorb, unify, "
+                  "or independence_day", req=True),
+      "nation": i("nation state id (selection-driven actions)"),
+      "region": i("region state id (transfer_region; give_ip alternative)"),
+      "target": s("nation dataName (transfer_region, secede), case-sensitive"),
+      "first": s("first nation dataName (absorb: the absorber; unify)"),
+      "second": s("second nation dataName (absorb: the absorbed; unify)"),
+      "amount": n("IP to invest (give_ip)"),
+      "priority": s("PriorityType name (give_ip), e.g. Economy, Welfare, "
+                    "Military; omit to fund every priority"),
+      "count": i("squadrons to add (add_sto, default 1)")}),
+    ("army_edit", compose.army_edit, False, True,
+     "One army by state id. action=set_health sets strength to value in "
+     "0..1 (refused outside it: the console reads anything unparsable as a "
+     "full heal); action=go_home teleports it to its home region. The asset "
+     "selection is cleared first so a unit picked in the UI cannot take the "
+     "command. " + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {"action": s("set_health or go_home", req=True),
+      "army": i("army state id", req=True),
+      "value": n("strength 0..1 (set_health)")}),
+    ("fleet_edit", compose.fleet_edit, False, True,
+     "Fleet and ship state. action=set_dv (fleet=<id>, value 0..1): refills "
+     "propellant, then sets every ship's delta-v to that fraction of max; "
+     "refused outside 0..1 because the console reads larger values as "
+     "percent and unparsable input as 0, which DRAINS the fleet. "
+     "action=damage_ship (fleet=<id>, value=<points>): internal damage to a "
+     "RANDOM ship of the fleet, works outside combat. action=add_officer "
+     "(ship=<display name>, officer=<dataName>): no selection, the ship is "
+     "matched by name case-insensitively, the officer retried with an "
+     "Officer_ prefix, and a ship name with a comma is refused. "
+     + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {"action": s("set_dv, damage_ship, or add_officer", req=True),
+      "fleet": i("fleet state id (set_dv, damage_ship)"),
+      "value": n("delta-v fraction 0..1 (set_dv) or damage points "
+                 "(damage_ship)"),
+      "ship": s("ship display name (add_officer)"),
+      "officer": s("officer dataName, with or without the Officer_ prefix "
+                   "(add_officer)")}),
+    ("councilor_move", compose.councilor_move, False, True,
+     "Teleport a councilor by state id to a region, fleet (its first ship) "
+     "or hab by state id. The console takes the councilor by display name, "
+     "read here from the state, and the destination from the selection; a "
+     "destination of any other type is refused, and a councilor whose name "
+     "holds a comma cannot be addressed. An unusable destination does "
+     "nothing in silence. " + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {"councilor": i("councilor state id", req=True),
+      "destination": i("region, fleet, or hab state id", req=True)}),
+    ("councilor_detain", compose.councilor_detain, False, True,
+     "Detain a councilor by state id, by your faction or by_faction=<dataName>. "
+     "The councilor is put in BOTH selection slots, since this command reads "
+     "the asset slot with no null check. The detainer must differ from the "
+     "councilor's own faction, so detaining YOUR councilor needs by_faction; "
+     "otherwise the console prints 'No councilor targeted'. "
+     + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {"councilor": i("councilor state id", req=True),
+      "by_faction": s("detaining faction dataName; defaults to the player "
+                      "faction")}),
+    ("turn_faction", compose.turn_faction, False, True,
+     "Turn a RANDOM councilor of the named faction into your mole, the state "
+     "a successful Turn mission leaves. You pick the faction, the game picks "
+     "the councilor; a bad name does nothing in silence. "
+     + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {"faction": s("faction dataName, case-sensitive", req=True)}),
+    ("force_missions", compose.force_missions, False, True,
+     "TOGGLE auto-success for every councilor mission (assignment "
+     "restrictions lifted). There is no readable state and no output, so "
+     "count your own calls; the flag lives on the mission UI controller and "
+     "resets on scene reload. " + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {}),
+    ("set_player_faction", compose.set_player_faction, False, True,
+     "Switch the active player to an AI faction by dataName. A faction a "
+     "human already holds is refused by the game ('Could not find AI "
+     "faction'), and AlienCouncil is refused here because some actions then "
+     "crash. TRAP: the switch is partial until the campaign is saved and "
+     "reloaded, so save_game then load_game before driving the new faction. "
+     + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {"faction": s("faction dataName, case-sensitive, not AlienCouncil",
+                   req=True)}),
+    ("atmosphere", compose.atmosphere, False, True,
+     "Change Earth's atmosphere by a DELTA in ppm: action=aerosols adds "
+     "stratospheric aerosols (cooling), action=co2 adds CO2; negative "
+     "removes. " + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {"action": s("aerosols or co2", req=True),
+      "ppm": n("ppm to add; negative removes", req=True)}),
+    ("propaganda", compose.propaganda, False, True,
+     "One Public Opinion push with the faction's ideology, strength 1 by "
+     "default, in nation=<dataName> or, with no nation, in EVERY extant human "
+     "nation at once. " + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {"faction": s("faction dataName whose ideology is pushed", req=True),
+      "strength": n("push strength (default 1)"),
+      "nation": s("nation dataName; omit to push everywhere")}),
+    ("unlock_all_ship_parts", compose.unlock_all_ship_parts, False, True,
+     "Show and unlock every ship part, alien parts included, for your "
+     "designs. Global debug flags with NO off switch short of restarting the "
+     "game. " + CONSOLE_SILENT + " Needs a loaded campaign.",
+     {}),
     ("time", compose.time_control, False, False,
      "Fine-grained clock control for what advance doesn't cover. Speed 5 is "
      "fastest -- set it before waiting on game days; run_until arms an "
@@ -1127,6 +1352,11 @@ TOOLS = [
 ]
 
 
+# Tools whose handlers return raw content blocks instead of going through
+# json_result, so the TEXT_LIMIT size hint would not describe their results.
+CONTENT_TOOLS = frozenset(("log_tail", "screenshot"))
+
+
 def build_defs():
     defs = []
     for name, _handler, ro, destr, desc, props in TOOLS:
@@ -1142,6 +1372,8 @@ def build_defs():
                      "annotations": {"readOnlyHint": ro,
                                      "destructiveHint": destr,
                                      "openWorldHint": False}})
+        if name not in CONTENT_TOOLS:
+            defs[-1]["_meta"] = {"anthropic/maxResultSizeChars": TEXT_LIMIT}
     return defs
 
 
@@ -1166,6 +1398,7 @@ def with_banner(result, banner):
 
 
 def handle_call(name, arguments, progress=None):
+    t0 = time.monotonic()
     # Pin any server module imported since the last call, so the freshness
     # check compares against the moment the code was loaded rather than the
     # moment it is asked about.
@@ -1176,10 +1409,12 @@ def handle_call(name, arguments, progress=None):
     # answered as tool errors, ahead of anything that would raise.
     handler = BY_NAME.get(name) if isinstance(name, str) else None
     if handler is None:
+        _log_call(name, arguments or {}, t0, "refused")
         return tool_result("unknown tool: %s" % (name,), True)
     if arguments is None:
         arguments = {}
     if not isinstance(arguments, dict):
+        _log_call(name, arguments, t0, "refused")
         return tool_result("arguments must be a JSON object, got %s"
                            % type(arguments).__name__, True)
     args = {k: v for k, v in arguments.items() if v is not None}
@@ -1195,6 +1430,7 @@ def handle_call(name, arguments, progress=None):
     except Exception:
         refusal, banner = None, None
     if refusal:
+        _log_call(name, args, t0, "refused")
         return tool_result(refusal, True)
     # A campaign the server has not seen before invalidates the counters that
     # describe the last one, and the transition need not have gone through a
@@ -1206,31 +1442,54 @@ def handle_call(name, arguments, progress=None):
         compose.note_campaign()
     except Exception:
         pass
+    outcome = "ok"
     try:
         if isinstance(handler, str):
             data = bridge.call(handler, args)
         else:
             data = handler(args, progress)
     except ToolError as e:
-        return with_banner(tool_result(str(e), True), banner)
+        outcome, result = "refused", tool_result(str(e), True)
     except bridge.VerbError as e:
         text = "bridge error: %s" % e
         if str(e).startswith("unknown command"):
             text += (" -- the running DLL is older than this server; rebuild "
                      "or update the mod DLL (run install.sh, restart the game)")
-        return with_banner(tool_result(text, True), banner)
+        outcome, result = "refused", tool_result(text, True)
     except bridge.BridgeTimeout as e:
-        return with_banner(tool_result(GAME_BUSY % e, True), banner)
+        outcome, result = "error", tool_result(GAME_BUSY % e, True)
     except bridge.BridgeError as e:
-        return with_banner(tool_result(GAME_DOWN % e, True), banner)
+        outcome, result = "error", tool_result(GAME_DOWN % e, True)
     except Exception as e:      # never wedge the agent on a handler bug
-        return with_banner(
-            tool_result("%s failed: %s: %s" % (name, type(e).__name__, e),
-                        True), banner)
-    if isinstance(data, dict) and "_content" in data:
-        return with_banner({"content": data["_content"], "isError": False},
-                           banner)
-    failed = isinstance(data, dict) and data.pop("_failed", False)
-    result = json_result(data)
-    result["isError"] = result["isError"] or bool(failed)
+        outcome, result = "error", tool_result(
+            "%s failed: %s: %s" % (name, type(e).__name__, e), True)
+    else:
+        if isinstance(data, dict) and "_content" in data:
+            result = {"content": data["_content"], "isError": False}
+        else:
+            failed = isinstance(data, dict) and data.pop("_failed", False)
+            result = json_result(data)
+            result["isError"] = result["isError"] or bool(failed)
+            if result["isError"]:
+                outcome = "error"
+    _log_call(name, args, t0, outcome)
     return with_banner(result, banner)
+
+
+def _log_call(name, args, t0, outcome):
+    stall = bridge.last_stall()[0]
+    shown = json.dumps(args, separators=(",", ":"), default=str)
+    if len(shown) > 200:
+        shown = shown[:200] + "..."
+    line = "%s tool=%s ms=%d outcome=%s stall=%s args=%s\n" % (
+        datetime.datetime.now().isoformat(timespec="milliseconds"),
+        name, (time.monotonic() - t0) * 1000, outcome,
+        "-" if stall is None else "%.1f" % stall, shown)
+    # The __main__ block creates the file; a process that never ran it
+    # (tests, --call) writes nothing.
+    try:
+        if os.path.exists(CALL_LOG):
+            with open(CALL_LOG, "a") as f:
+                f.write(line)
+    except OSError:
+        pass

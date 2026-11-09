@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Threading;
 using UnityEngine;
@@ -33,6 +34,12 @@ namespace TerraInvictaMCP
         static bool engaged;
 
         static bool brutal;
+
+        // Opt-in, and read by four postfixes that lean the engaged faction's own
+        // planning toward its victory objective. They hold no state of their own to
+        // restore.
+        static bool victoryBias;
+
         static TIFactionState faction;
         static TIGlobalValuesState campaign;
 
@@ -76,15 +83,15 @@ namespace TerraInvictaMCP
 
         // ---- verb ------------------------------------------------------------
 
-        internal static JToken Control(string action, string smart)
+        internal static JToken Control(string action, string smart, bool victoryBias)
         {
-            if (action == "engage") return Engage(smart);
+            if (action == "engage") return Engage(smart, victoryBias);
             if (action == "release") return Release("released");
             if (action == "status") return Status(null);
             throw new VerbError("action must be engage, release, or status");
         }
 
-        static JToken Engage(string smart)
+        static JToken Engage(string smart, bool bias)
         {
             if (engaged) throw new VerbError("already engaged; release first");
             if (smart != "campaign" && smart != "brutal")
@@ -113,6 +120,16 @@ namespace TerraInvictaMCP
                 throw new VerbError("save shim is not installed (GameStateManager."
                     + "SaveAllGameStates did not patch), so a save taken while engaged would "
                     + "load with the campaign handed to another faction; refusing to engage");
+            // Refused rather than degraded, for the same reason as a brutal run with
+            // a window missing: the three lean on different parts of one plan, and a
+            // run with two of them measures a planner nobody asked for.
+            if (bias && !biasPatched)
+                throw new VerbError("not every victory-bias patch landed (a game update "
+                    + "likely changed AIEvaluators.ShouldFocusOnObjectiveProject, "
+                    + "TIFactionState.TechRoleValuation, AIEvaluators.EvaluateNation or "
+                    + "AIEvaluators.EvaluateHabModule_PercentChange; status reports "
+                    + "victoryBiasPatches false), so the faction would be only partly "
+                    + "biased; engage without victory_bias instead");
 
             // The vanilla autopilot macro force-unpauses every frame from its own
             // Update and plays the UI itself, so running it
@@ -132,6 +149,11 @@ namespace TerraInvictaMCP
             // cannot disagree with itself.
             campaign = SafeGlobalValues();
             brutal = smart == "brutal";
+            victoryBias = bias;
+            // Cleared here as well as on release: a release that threw on its way
+            // through planner reinitialization would otherwise carry its counts into
+            // the next engagement.
+            ResetBiasCounters();
             deferredPhaseTicks = 0;
             resumedPauses = 0;
 
@@ -164,6 +186,8 @@ namespace TerraInvictaMCP
             // whatever else fails below.
             engaged = false;
             brutal = false;
+            victoryBias = false;
+            ClearBiasCache();
 
             // 2. Hand the faction back. Attempted even when the campaign identity
             // no longer matches: writing the flag on a discarded state is harmless,
@@ -184,7 +208,11 @@ namespace TerraInvictaMCP
 
             // 4. Everything that can throw, after the reversal is complete.
             if (sameCampaign) Reinitialize();
-            return Status(note);
+            // Counted after the response is built, so the release still reports the
+            // engagement's own totals and the next engage starts from zero.
+            JToken response = Status(note);
+            ResetBiasCounters();
+            return response;
         }
 
         static JToken Status(string note)
@@ -201,6 +229,9 @@ namespace TerraInvictaMCP
             o["resumedPauses"] = resumedPauses;
             o["difficultyWindows"] = windowsPatched;
             o["difficultySetter"] = SetDifficulty != null;
+            o["victoryBias"] = engaged && victoryBias;
+            o["victoryBiasPatches"] = biasPatched;
+            o["victoryBiasHits"] = BiasHits();
             if (note != null) o["note"] = note;
             return o;
         }
@@ -506,6 +537,7 @@ namespace TerraInvictaMCP
         static bool audiencePatched;
         static bool phaseGuardPatched;
         static bool windowsPatched;
+        static bool biasPatched;
 
         // Every patch goes through one warn-and-skip path, applied by hand rather
         // than by attribute: PatchAll throws on an unresolvable target, and a game
@@ -540,6 +572,7 @@ namespace TerraInvictaMCP
                 nameof(StartMissionPhasePrefix), null, null);
 
             InstallWindows(harmony);
+            InstallBias(harmony);
         }
 
         // The six leaf methods whose synchronous windows cover every read that
@@ -625,6 +658,395 @@ namespace TerraInvictaMCP
         static HarmonyMethod Method(string name)
         {
             return name == null ? null : new HarmonyMethod(typeof(AiControl), name);
+        }
+
+        // ---- victory bias ------------------------------------------------------
+
+        // Four postfixes that lean the engaged faction's planner toward the goal it
+        // wins on: two on what it researches, two on where it expands. Each changes
+        // a value on its way out of an evaluator, and none of them holds state of
+        // its own to restore. What the planner then does with those values is
+        // ordinary play and reaches game state like any other planning decision.
+        static void InstallBias(Harmony harmony)
+        {
+            bool ok = true;
+
+            ok &= Patch(harmony,
+                AccessTools.Method(typeof(AIEvaluators), "ShouldFocusOnObjectiveProject",
+                    new Type[] { typeof(TIFactionState), typeof(bool).MakeByRefType() }),
+                "AIEvaluators.ShouldFocusOnObjectiveProject",
+                null, nameof(FocusPostfix), null);
+
+            ok &= Patch(harmony,
+                AccessTools.Method(typeof(TIFactionState), "TechRoleValuation",
+                    new Type[] { typeof(TechRole) }),
+                "TIFactionState.TechRoleValuation",
+                null, nameof(TechRolePostfix), null);
+
+            ok &= Patch(harmony,
+                AccessTools.Method(typeof(AIEvaluators), "EvaluateNation",
+                    new Type[] { typeof(TIFactionState), typeof(TINationState) }),
+                "AIEvaluators.EvaluateNation",
+                null, nameof(NationPostfix), null);
+
+            ok &= Patch(harmony, HabModuleEvaluator(),
+                "AIEvaluators.EvaluateHabModule_PercentChange",
+                null, nameof(HabSitePostfix), null);
+
+            // Knob B needs the private body test as much as it needs its patch, and
+            // a reflection miss there would leave it inert with every patch
+            // reporting installed.
+            ok &= MySpaceAssetRegion != null;
+            if (MySpaceAssetRegion == null)
+                Main.Log.Log("WARNING: TIVictoryTemplate.MySpaceAssetRegion not found; "
+                    + "the victory-bias hab knob is absent.");
+
+            biasPatched = ok;
+        }
+
+        // The full parameter list, not the name alone: an overload added by a game
+        // update would make a name-only lookup ambiguous, and AccessTools answers
+        // that by throwing out of Main.Load. Wrapped for the same reason.
+        static MethodInfo HabModuleEvaluator()
+        {
+            try
+            {
+                return AccessTools.Method(typeof(AIEvaluators), "EvaluateHabModule_PercentChange",
+                    new Type[] { typeof(TIFactionState), typeof(TIGameState),
+                        typeof(TIHabModuleTemplate), typeof(HabPreferences),
+                        typeof(IEnumerable<TIHabModuleTemplate>),
+                        typeof(Func<FactionResource, float>), typeof(bool), typeof(bool) });
+            }
+            catch (Exception e)
+            {
+                Main.Log.Log("WARNING: looking up AIEvaluators.EvaluateHabModule_PercentChange "
+                    + "failed: " + e.Message);
+                return null;
+            }
+        }
+
+        // Scoped exactly like Swap, minus the campaign identity test: a stale scope
+        // costs one skewed evaluation rather than a stranded value, and Tick
+        // releases the engagement when the campaign changes.
+        static bool Biased(TIFactionState scope)
+        {
+            return engaged && victoryBias
+                && Thread.CurrentThread.ManagedThreadId == Main.MainThreadId
+                && ReferenceEquals(scope, faction);
+        }
+
+        // Takes the planner's own hyperfocus whenever an objective project is on
+        // the board, instead of only when the engine's research-rate arithmetic
+        // says the project is close enough. The objective-project test is the
+        // reason this is not two assignments: SetResearchPriorities answers
+        // hyperfocus by giving the Objective project weight 3 and every other
+        // project slot 0, so forcing it with no such project running would zero
+        // every slot for nothing.
+        //
+        // Hyperfocus is also one of the three terms that make SetResearchPriorities
+        // call EndTechRace, so a biased faction drops out of any tech race it is in
+        // rather than split research with the objective chain.
+        //
+        // The parameter is named for the argument it binds to, which shadows the
+        // static field inside this method only.
+        static void FocusPostfix(TIFactionState faction, ref bool hyperFocus, ref bool __result)
+        {
+            if (!Biased(faction)) return;
+            if (__result && hyperFocus) return;
+            if (!HasObjectiveProject(faction)) return;
+            __result = true;
+            hyperFocus = true;
+            focusHits++;
+        }
+
+        static bool HasObjectiveProject(TIFactionState target)
+        {
+            try
+            {
+                var projects = target.CurrentlyActiveProjects();
+                if (projects == null) return false;
+                for (int i = 0; i < projects.Count; i++)
+                {
+                    TIProjectTemplate project = projects[i];
+                    if (project != null && project.AI_projectRole == ProjectRole.Objective)
+                        return true;
+                }
+                return false;
+            }
+            catch (Exception e) { Server.LastError = Verbs.Note(e); return false; }
+        }
+
+        // The FactionObjective arm is a flat 10 that the caller multiplies into a
+        // tech's score, and the only arm that can outrank it is space war, at up to
+        // 15. Doubling clears that without making the score a function of the role
+        // alone.
+        const float ObjectiveTechScale = 2f;
+
+        // Role first: this runs for every role on every tech the valuation walks,
+        // and for every faction, so the cheap rejection goes in front.
+        static void TechRolePostfix(TIFactionState __instance, TechRole role, ref float __result)
+        {
+            if (role != TechRole.FactionObjective) return;
+            if (!Biased(__instance)) return;
+            __result *= ObjectiveTechScale;
+            techRoleHits++;
+        }
+
+        // How much of the denominator a nation is worth, as a multiplier on its
+        // score. Every candidate in the planner's expansion pass is a nation the
+        // faction does not hold, so a flat factor would leave their order exactly
+        // as it was; the share is what reorders them. At 20 a nation holding 5
+        // percent of the denominator doubles its score and one holding half a
+        // percent moves 10 percent.
+        const float ExpansionWeight = 20f;
+
+        // Recomputed once per game day, because every part of it is a walk over
+        // nations or bodies and EvaluateNation runs per candidate per pass.
+        // year*10000 + month*100 + day; 0 means no campaign clock, which recomputes.
+        static int biasCacheDay;
+
+        // The game date cannot change within a frame, and TITimeState.Now() allocates,
+        // so the date is consulted once per frame rather than once per evaluation.
+        static int biasCacheFrame = -1;
+
+        // The raw site scores this postfix has seen so far today, and the spread of
+        // the last day that saw any. The bonus is sized from the completed day
+        // because the current day's spread is not known until its last site is
+        // scored, and a planner pass scores them all in one go.
+        static float daySiteMin;
+        static float daySiteMax;
+        static bool daySiteSeen;
+        static float previousDaySpread;
+
+        // The denominator each unmet proportion condition is measured against, or 0
+        // when the condition is met, absent, or unreadable.
+        static float unmetPopulationDenominator;
+        static float unmetGdpDenominator;
+
+        // The major bodies the faction still needs a qualifying surface base on, or
+        // null when the victory has no base-presence condition or already meets it.
+        static List<TISpaceBodyState> unmetMajorBodies;
+
+        static int focusHits;
+        static int techRoleHits;
+        static int nationHits;
+        static int habSiteHits;
+
+        // MySpaceAssetRegion is private, so this is the only way to ask the engine
+        // its own question about a body instead of restating the rule here (surface
+        // base on the body or one of its moons, every module active and at tier >=
+        // value). Invoked rather than wrapped in a delegate: at most six calls per
+        // game day.
+        static readonly MethodInfo MySpaceAssetRegion = AccessTools.Method(
+            typeof(TIVictoryTemplate), "MySpaceAssetRegion",
+            new Type[] { typeof(TIFactionState),
+                typeof(TIVictoryTemplate.VictoryConditionType),
+                typeof(TISpaceBodyState), typeof(int) });
+
+        static void RefreshBiasCache(TIFactionState target)
+        {
+            int frame = Time.frameCount;
+            if (frame == biasCacheFrame) return;
+            biasCacheFrame = frame;
+
+            TIDateTime now = TITimeState.Now();
+            int day = now == null ? 0 : now.year * 10000 + now.month * 100 + now.day;
+            if (day != 0 && day == biasCacheDay) return;
+            biasCacheDay = day;
+            if (daySiteSeen) previousDaySpread = daySiteMax - daySiteMin;
+            daySiteSeen = false;
+            unmetPopulationDenominator = 0f;
+            unmetGdpDenominator = 0f;
+            unmetMajorBodies = null;
+
+            TIVictoryTemplate victory = target.victoryTemplate;
+            List<TIVictoryTemplate.VictoryCondition> conditions =
+                victory != null ? victory.victoryConditions : null;
+            if (conditions == null) return;
+
+            for (int i = 0; i < conditions.Count; i++)
+            {
+                TIVictoryTemplate.VictoryCondition condition = conditions[i];
+                if (condition.conditionType
+                    == TIVictoryTemplate.VictoryConditionType.BasePresence_MajorPlanets)
+                {
+                    unmetMajorBodies = UnmetMajorBodies(victory, target, condition);
+                    continue;
+                }
+                bool population = condition.conditionType
+                    == TIVictoryTemplate.VictoryConditionType.GlobalPopulationProportion;
+                bool gdp = condition.conditionType
+                    == TIVictoryTemplate.VictoryConditionType.GlobalGDPProportion;
+                // Only these two, and never the base-presence type: the numerator
+                // and denominator pair covers condition types 1..20, and everything
+                // else falls to a default arm that logs an engine error and
+                // returns 0.
+                if (!population && !gdp) continue;
+                float denominator = victory.VictoryConditionDenominator(condition);
+                if (denominator <= 0f) continue;
+                if (victory.VictoryConditionNumerator(target, condition) / denominator
+                    >= condition.value) continue;
+                if (population) unmetPopulationDenominator = denominator;
+                else unmetGdpDenominator = denominator;
+            }
+        }
+
+        static List<TISpaceBodyState> UnmetMajorBodies(TIVictoryTemplate victory,
+            TIFactionState target, TIVictoryTemplate.VictoryCondition condition)
+        {
+            if (MySpaceAssetRegion == null) return null;
+            List<TISpaceBodyState> bodies = victory.GetMajorBuildablePlanetRegions();
+            if (bodies == null) return null;
+            List<TISpaceBodyState> unmet = null;
+            for (int i = 0; i < bodies.Count; i++)
+            {
+                // The condition argument is passed as the literal rather than read
+                // back off the condition: the engine's own body test answers false
+                // for every other type, so anything else here would read as "no
+                // base anywhere" and bias every site on the map.
+                object held = MySpaceAssetRegion.Invoke(victory, new object[] {
+                    target,
+                    TIVictoryTemplate.VictoryConditionType.BasePresence_MajorPlanets,
+                    bodies[i], (int)condition.value });
+                if (held is bool && (bool)held) continue;
+                if (unmet == null) unmet = new List<TISpaceBodyState>();
+                unmet.Add(bodies[i]);
+            }
+            return unmet;
+        }
+
+        // The planner's expansion pass sorts uncontrolled nations by EvaluateNation
+        // times public opinion, and EvaluateNation is dominated by economy: it never
+        // asks what the faction's own victory still needs. This scales a candidate by
+        // its share of the unmet denominator, so a populous nation outranks a merely
+        // rich one when the victory is counted in people.
+        //
+        // The same value feeds the councilor mission planner's nation payoff cache,
+        // so councilor targeting leans the same way. That is the intended direction
+        // and is not separately counted.
+        static void NationPostfix(TIFactionState faction, TINationState nation, ref float __result)
+        {
+            if (nation == null || !Biased(faction)) return;
+            try
+            {
+                RefreshBiasCache(faction);
+                if (unmetPopulationDenominator <= 0f && unmetGdpDenominator <= 0f) return;
+
+                // A nation already held contributes to the numerator already.
+                List<TINationState> held = faction.majorityControlNations;
+                if (held != null && held.Contains(nation)) return;
+
+                float share = 0f;
+                if (unmetPopulationDenominator > 0f)
+                    share = NationPopulation(nation) / unmetPopulationDenominator;
+                if (unmetGdpDenominator > 0f)
+                {
+                    float gdpShare = (float)(nation.GDP / unmetGdpDenominator);
+                    if (gdpShare > share) share = gdpShare;
+                }
+                if (share <= 0f) return;
+
+                // A zero score stays zero through the multiply, and counting that
+                // would report a knob working when it moved nothing.
+                bool changed = __result != 0f;
+                __result *= 1f + ExpansionWeight * share;
+                if (changed) nationHits++;
+            }
+            catch (Exception e) { Server.LastError = Verbs.Note(e); }
+        }
+
+        static float NationPopulation(TINationState nation)
+        {
+            List<TIRegionState> regions = nation.regions;
+            if (regions == null) return 0f;
+            float total = 0f;
+            for (int i = 0; i < regions.Count; i++)
+            {
+                TIRegionState region = regions[i];
+                if (region != null) total += region.populationInMillions;
+            }
+            return total;
+        }
+
+        // Sites only. The same method scores modules at an existing hab, where the
+        // result is a percent change that is routinely negative and ranks modules
+        // against each other; touching it there would move that ranking.
+        //
+        // The bonus is additive and sized from the spread of the scores the day
+        // before, because the two site-selection paths treat a raw score
+        // differently: HumanHabPlanner.ManageFoundGoals, which is the path an
+        // engaged human faction takes, rebases every weight by about a third of the
+        // spread plus whatever it takes to clear zero, so a multiplier is nearly
+        // invisible there, while the legacy planner clamps each weight to about
+        // zero, so a negative site never gets drawn at all. Half the spread roughly
+        // doubles a site's weight on the rebased path and lifts it into the draw on
+        // the clamped one, and adding rather than scaling leaves the order among
+        // boosted sites alone.
+        //
+        // This biases where the faction founds bases. The condition also wants every
+        // module on those bases at the tier the victory names, which this does not
+        // address.
+        static void HabSitePostfix(TIFactionState faction, TIGameState location, ref float __result)
+        {
+            if (!(location is TIHabSiteState) || !Biased(faction)) return;
+            try
+            {
+                RefreshBiasCache(faction);
+
+                // Every site the postfix sees, boosted or not, sizes tomorrow's
+                // bonus.
+                if (!daySiteSeen)
+                {
+                    daySiteMin = __result;
+                    daySiteMax = __result;
+                    daySiteSeen = true;
+                }
+                else if (__result < daySiteMin) daySiteMin = __result;
+                else if (__result > daySiteMax) daySiteMax = __result;
+
+                if (unmetMajorBodies == null || unmetMajorBodies.Count == 0) return;
+                // A moon site resolves to the planet, which is what the condition
+                // counts.
+                TISpaceBodyState body = location.ref_system;
+                if (body == null || !unmetMajorBodies.Contains(body)) return;
+
+                // No spread yet means the first scored day of an engagement; 1 is
+                // enough to put a clamped site into the draw.
+                __result += previousDaySpread > 0f ? 0.5f * previousDaySpread : 1f;
+                habSiteHits++;
+            }
+            catch (Exception e) { Server.LastError = Verbs.Note(e); }
+        }
+
+        // One count per postfix that actually changed a value, so a run can tell a
+        // knob that never fired from one whose victory condition it cannot reach.
+        static JObject BiasHits()
+        {
+            var hits = new JObject();
+            hits["focus"] = focusHits;
+            hits["techRole"] = techRoleHits;
+            hits["nation"] = nationHits;
+            hits["habSite"] = habSiteHits;
+            return hits;
+        }
+
+        static void ResetBiasCounters()
+        {
+            focusHits = 0;
+            techRoleHits = 0;
+            nationHits = 0;
+            habSiteHits = 0;
+        }
+
+        static void ClearBiasCache()
+        {
+            biasCacheDay = 0;
+            biasCacheFrame = -1;
+            daySiteSeen = false;
+            previousDaySpread = 0f;
+            unmetPopulationDenominator = 0f;
+            unmetGdpDenominator = 0f;
+            unmetMajorBodies = null;
         }
 
         // ---- difficulty windows ----------------------------------------------
@@ -838,7 +1260,8 @@ namespace TerraInvictaMCP
 
     public static partial class Verbs
     {
-        // action=engage|release|status; engage takes smart=campaign|brutal.
+        // action=engage|release|status; engage takes smart=campaign|brutal and
+        // victory_bias.
         static JToken AiControl_Verb(JObject args)
         {
             string action = Str(args, "action") ?? "status";
@@ -846,7 +1269,10 @@ namespace TerraInvictaMCP
             // that gets somewhere, so it plays as well as it can unless the caller
             // asks for the campaign's own difficulty.
             string smart = Str(args, "smart") ?? "brutal";
-            return AiControl.Control(action, smart);
+            // Off by default: it changes how the faction plays, which is the one
+            // thing a run measuring the AI must ask for rather than inherit.
+            bool bias = Flag(args, "victory_bias");
+            return AiControl.Control(action, smart, bias);
         }
 
         // The vanilla autopilot macro's state. Separate from ai.control, which owns the

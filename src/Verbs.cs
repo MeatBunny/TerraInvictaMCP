@@ -29,7 +29,7 @@ namespace TerraInvictaMCP
 
     public static partial class Verbs
     {
-        public const string ModVersion = "0.1.2";
+        public const string ModVersion = "0.2.0";
 
         // query.state fans out over one object's members; a ref list longer than this
         // is a graph the client should walk with more queries instead.
@@ -97,6 +97,7 @@ namespace TerraInvictaMCP
             Add(t, "spawn.army", true, SpawnArmy);
             Add(t, "spawn.councilor", true, SpawnCouncilor);
             Add(t, "spawn.alien_site", true, SpawnAlienSite);
+            Add(t, "region.nuke", true, RegionNuke);
             Add(t, "design.create", true, DesignCreate);
             Add(t, "design.delete", true, DesignDelete);
             Add(t, "design.auto", true, DesignAuto);
@@ -112,6 +113,7 @@ namespace TerraInvictaMCP
             Add(t, "action.list", false, ActionList);
             Add(t, "action.invoke", true, ActionInvoke);
             Add(t, "test.crash_the_game", true, TestCrashTheGame);
+            Add(t, "test.autoresolve_fault", true, TestAutoresolveFault);
             return t;
         }
 
@@ -403,11 +405,36 @@ namespace TerraInvictaMCP
             return o;
         }
 
+        // Two selection slots, because the engine has two. `slot=other` is the map
+        // selection; `slot=asset` is the one several console commands read before the
+        // map slot, so a stale UI selection there quietly redirects their write.
+        // The asset slot is the only one that clears: the game deselects it by calling
+        // its setter with null (ConditionalCancelSelectedAsset).
         static JToken Select(JObject args)
         {
+            string wanted = Str(args, "slot");
+            if (wanted != null) wanted = wanted.Trim();
+            if (string.IsNullOrEmpty(wanted)) wanted = "other";
+            bool asset = Same(wanted, "asset");
+            if (!asset && !Same(wanted, "other"))
+                throw new VerbError("arg 'slot' must be 'other' or 'asset', got '"
+                    + wanted + "'");
+
+            JToken id = args != null ? args["id"] : null;
+            if (asset && (id == null || id.Type == JTokenType.Null))
+            {
+                GeneralControlsController.SetUISelectedAssetState(null);
+                var cleared = new JObject();
+                cleared["slot"] = "asset";
+                return cleared;
+            }
+
             TIGameState state = Arg<TIGameState>(args, "id");
-            GeneralControlsController.SetUIOtherSelectedState(state);
-            return Describe(state);
+            if (asset) GeneralControlsController.SetUISelectedAssetState(state);
+            else GeneralControlsController.SetUIOtherSelectedState(state);
+            var o = (JObject)Describe(state);
+            o["slot"] = asset ? "asset" : "other";
+            return o;
         }
 
         static JToken QueryTime(JObject args)
@@ -489,13 +516,17 @@ namespace TerraInvictaMCP
 
         static JToken QueryFactions(JObject args)
         {
+            int limit = OptionalLimit(args);
             var a = new JArray();
+            int total = 0;
             TIFactionState[] factions = GameStateManager.AllFactions();
-            if (factions == null) return a;
+            if (factions == null) return Page(a, total, limit);
             for (int i = 0; i < factions.Length; i++)
             {
                 TIFactionState f = factions[i];
                 if (f == null) continue;
+                total++;
+                if (a.Count >= limit) continue;
                 var o = new JObject();
                 o["id"] = (int)f.ID;
                 o["name"] = StateName(f);
@@ -507,7 +538,17 @@ namespace TerraInvictaMCP
                 Put(o, "estimatedAlienHate", delegate { return Num(f.GetEstimatedAlienHate()); });
                 a.Add(o);
             }
-            return a;
+            return Page(a, total, limit);
+        }
+
+        // The list reply shape: the items under one key, with the paging triple beside
+        // them.
+        static JObject Page(JArray items, int total, int limit)
+        {
+            var o = new JObject();
+            AddPage(o, items, total, limit);
+            o["items"] = items;
+            return o;
         }
 
         static JToken Resources(TIFactionState f)
@@ -525,12 +566,16 @@ namespace TerraInvictaMCP
         static JToken QueryHabs(JObject args)
         {
             int factionFilter = OptionalInt(args, "faction");
+            int limit = OptionalLimit(args);
             var a = new JArray();
+            int total = 0;
             foreach (TIHabState hab in GameStateManager.IterateByClass<TIHabState>(false))
             {
                 if (hab == null) continue;
                 TIFactionState owner = FactionOf(hab);
                 if (factionFilter >= 0 && (owner == null || (int)owner.ID != factionFilter)) continue;
+                total++;
+                if (a.Count >= limit) continue;
                 var o = new JObject();
                 o["id"] = (int)hab.ID;
                 o["name"] = StateName(hab);
@@ -541,7 +586,7 @@ namespace TerraInvictaMCP
                 Put(o, "moduleCount", delegate { return (JToken)hab.numCompletedModules; });
                 a.Add(o);
             }
-            return a;
+            return Page(a, total, limit);
         }
 
         // Site first: a hab that sits on a body reports the body's site, and only a
@@ -566,12 +611,16 @@ namespace TerraInvictaMCP
         static JToken QueryFleets(JObject args)
         {
             int factionFilter = OptionalInt(args, "faction");
+            int limit = OptionalLimit(args);
             var a = new JArray();
+            int total = 0;
             foreach (TISpaceFleetState fleet in GameStateManager.IterateByClass<TISpaceFleetState>(false))
             {
                 if (fleet == null) continue;
                 TIFactionState owner = FactionOf(fleet);
                 if (factionFilter >= 0 && (owner == null || (int)owner.ID != factionFilter)) continue;
+                total++;
+                if (a.Count >= limit) continue;
                 var o = new JObject();
                 o["id"] = (int)fleet.ID;
                 o["name"] = StateName(fleet);
@@ -589,7 +638,7 @@ namespace TerraInvictaMCP
                 Put(o, "inCombatOrWaiting", delegate { return (JToken)fleet.inCombatOrWaitingForCombat; });
                 a.Add(o);
             }
-            return a;
+            return Page(a, total, limit);
         }
 
         static TIFactionState FactionOf(TIGameState state)
@@ -620,6 +669,9 @@ namespace TerraInvictaMCP
                 throw new VerbError("pass 'id' (a game state id) or "
                     + "'root' (a static entry point, e.g. 'GameControl.control')");
 
+            List<string> fields = MemberFilter(args);
+            int limit = OptionalLimit(args);
+
             string pathText = Str(args, "path");
             object current = hasId
                 ? (object)ById<TIGameState>(Int(args, "id"))
@@ -638,11 +690,12 @@ namespace TerraInvictaMCP
             {
                 o["id"] = (int)state.ID;
                 o["name"] = StateName(state);
-                o["members"] = Members(state, includePrivate);
+                o["members"] = Members(state, includePrivate, fields, limit, o);
                 return o;
             }
             if (current == null)
             {
+                NoMembers(fields, limit, "nothing");
                 o["value"] = JValue.CreateNull();
                 return o;
             }
@@ -651,38 +704,96 @@ namespace TerraInvictaMCP
             JToken scalar = ScalarToken(current);
             if (scalar != null)
             {
+                NoMembers(fields, limit, "a value");
                 o["value"] = scalar;
                 return o;
             }
             JToken collection = Collection(current, current.GetType(), o);
             if (collection != null)
             {
+                NoMembers(fields, limit, "a collection");
                 o["value"] = collection;
                 return o;
             }
-            o["members"] = Members(current, includePrivate);
+            o["members"] = Members(current, includePrivate, fields, limit, o);
             return o;
         }
 
-        // The endpoint dump, identical in shape whatever the walk landed on.
-        static JObject Members(object target, bool includePrivate)
+        // Names to keep in the endpoint dump, matched the way a path segment is.
+        static List<string> MemberFilter(JObject args)
         {
-            var members = new JObject();
+            JToken t = args != null ? args["fields"] : null;
+            if (t == null || t.Type == JTokenType.Null) return null;
+            List<string> names = StringList(t, MaxFieldNames, "field names");
+            if (names.Count == 0) throw new VerbError("arg 'fields' is empty");
+            return names;
+        }
+
+        // A value endpoint renders whole and reports no members at all, so honoring
+        // either argument silently would answer a dump that reads as "the member is
+        // absent" or "the rest was cut".
+        static void NoMembers(List<string> fields, int limit, string what)
+        {
+            string arg = fields != null ? "fields"
+                : (limit != int.MaxValue ? "limit" : null);
+            if (arg == null) return;
+            throw new VerbError("arg '" + arg + "' does not apply: the path lands on "
+                + what + "; both select members, and this endpoint has none");
+        }
+
+        // The endpoint dump, identical in shape whatever the walk landed on. Members
+        // come out in name order, so a `limit` cuts the same page twice running;
+        // `fields` is an allowlist applied before the cut, and the names it matched
+        // nothing with are reported on the endpoint report.
+        static JObject Members(object target, bool includePrivate, List<string> fields,
+            int limit, JObject report)
+        {
             List<MemberInfo> list = ReadableMembers(target.GetType(), includePrivate);
+            list.Sort(delegate(MemberInfo a, MemberInfo b)
+            {
+                return string.CompareOrdinal(a.Name, b.Name);
+            });
+            Dictionary<string, bool> wanted = null;
+            if (fields != null)
+            {
+                wanted = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+                for (int i = 0; i < fields.Count; i++) wanted[fields[i]] = false;
+            }
+
+            var keep = new List<MemberInfo>();
             for (int i = 0; i < list.Count; i++)
             {
                 MemberInfo m = list[i];
                 if (IsObsolete(m)) continue;
-                FieldInfo f = m as FieldInfo;
-                if (f != null)
-                {
-                    members[f.Name] = Read(target, f, null);
-                    continue;
-                }
-                PropertyInfo p = (PropertyInfo)m;
+                PropertyInfo p = m as PropertyInfo;
                 // A public property can still hide its getter.
-                if (p.GetGetMethod(includePrivate) == null) continue;
-                members[p.Name] = Read(target, null, p);
+                if (p != null && p.GetGetMethod(includePrivate) == null) continue;
+                if (wanted != null)
+                {
+                    if (!wanted.ContainsKey(m.Name)) continue;
+                    wanted[m.Name] = true;
+                }
+                keep.Add(m);
+            }
+
+            var members = new JObject();
+            int n = keep.Count < limit ? keep.Count : limit;
+            for (int i = 0; i < n; i++)
+            {
+                FieldInfo f = keep[i] as FieldInfo;
+                members[keep[i].Name] = f != null
+                    ? Read(target, f, null)
+                    : Read(target, null, (PropertyInfo)keep[i]);
+            }
+            report["count"] = keep.Count;
+            report["returned"] = members.Count;
+            report["truncated"] = keep.Count > limit;
+            if (wanted != null)
+            {
+                var missing = new JArray();
+                for (int i = 0; i < fields.Count; i++)
+                    if (!wanted[fields[i]]) missing.Add(new JValue(fields[i]));
+                report["missingFields"] = missing;
             }
             return members;
         }
@@ -2127,6 +2238,17 @@ namespace TerraInvictaMCP
             int limit = OptionalInt(args, "limit");
             if (limit <= 0) limit = def;
             if (limit > max) limit = max;
+            return limit;
+        }
+
+        // The optional 'limit' of a verb that has no cap of its own: absent answers
+        // everything, which is what those verbs did before the argument existed.
+        static int OptionalLimit(JObject args)
+        {
+            JToken t = args != null ? args["limit"] : null;
+            if (t == null || t.Type == JTokenType.Null) return int.MaxValue;
+            int limit = WholeNumber(t, "limit");
+            if (limit < 1) throw new VerbError("arg 'limit' must be at least 1");
             return limit;
         }
 

@@ -26,6 +26,7 @@ if SERVER_DIR not in sys.path:
 import _offline                                     # noqa: E402,F401
 import bridge                                       # noqa: E402
 import compose                                      # noqa: E402
+import tools                                        # noqa: E402
 from test_advance import _no_sleep                  # noqa: E402
 
 
@@ -292,6 +293,13 @@ class UnreadPromptQueueTest(unittest.TestCase):
         self.assertEqual(fake.count("prompts.dismiss"), 0)
         self.assertIsNone(report["orphanPrompt"])
         self.assertNotIn("orphanPromptNote", report)
+
+
+class AutoresolveFaultFixtureTest(unittest.TestCase):
+    def test_the_verb_is_declared_so_selftest_covers_it(self):
+        # selftest diffs this set against the DLL's registry; a verb missing
+        # from it hides in the unmapped list instead of failing.
+        self.assertIn("test.autoresolve_fault", tools.BRIDGE_VERBS_RAW_ONLY)
 
 
 if __name__ == "__main__":
